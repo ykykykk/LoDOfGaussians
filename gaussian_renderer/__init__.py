@@ -16,6 +16,9 @@ import math
 from utils.sh_utils import eval_sh
 import numpy as np
 import torchvision
+from utils.gsplat_compat import prepare_gsplat_windows
+
+prepare_gsplat_windows()
 from gsplat import rasterization
 from globals import *
 

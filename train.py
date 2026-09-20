@@ -30,6 +30,7 @@ if __name__ == '__main__':
     
     parser.add_argument('--output_dir', default="")
     parser.add_argument('--skip_if_exists', action="store_true", default=False, help="Skip coarse training if a scaffold already exists. This is determined by checking if there are any iterations in the scaffold point cloud directory.")
+    parser.add_argument('--export_ply', default="", help="Write every Gaussian from the final hierarchy to this PLY path.")
     args = parser.parse_args()
     
     
@@ -99,17 +100,17 @@ if __name__ == '__main__':
     if args.skip_if_exists and os.path.exists(os.path.join(output_dir, f"scaffold/point_cloud/iteration_{chosen_iteration}/hierarchy.dhier")):
         print(f"Skipping coarse training, scaffold has been trained for {chosen_iteration} iterations.")
     else:
-        hierarchy_creator_args = "submodules/gaussianhierarchy/build/Release/GaussianHierarchyCreator.exe " if os_name == "Windows" else "submodules/gaussianhierarchy/build/GaussianHierarchyCreator "
-        hierarchy_creator_args = os.path.join(f_path.parent, hierarchy_creator_args)
+        hierarchy_creator = f_path.parent / "submodules" / "gaussianhierarchy" / "build"
+        hierarchy_creator /= "Release/GaussianHierarchyCreator.exe" if os_name == "Windows" else "GaussianHierarchyCreator"
         try:
             subprocess.run(
-            hierarchy_creator_args + " ".join([
+                [str(hierarchy_creator), *[
                     os.path.join(output_dir, f"scaffold/point_cloud/iteration_{chosen_iteration}/point_cloud.ply"),
                     os.path.join(output_dir, "../"),
                     os.path.join(output_dir, f"scaffold/point_cloud/iteration_{chosen_iteration}/")
                     ,os.path.join(output_dir, f"scaffold/point_cloud/iteration_{chosen_iteration}/")
-                ]),
-                shell=True, check=True, text=True
+                ]],
+                check=True, text=True
             )
         except subprocess.CalledProcessError as e:
                     print(f"Error executing hierarchy_creator: {e}")
@@ -131,5 +132,10 @@ if __name__ == '__main__':
         saving_iterations=[200000, 250000, 300000], 
 
         view_graph=view_graph_utils)
+
+    if args.export_ply:
+        from tools.export_ply import export_hierarchy_ply
+
+        export_hierarchy_ply(Path(output_dir) / optimization_params.output_file_name, Path(args.export_ply))
     
     print(f"Training finished in {time.time() - start_time:.2f} seconds.")
