@@ -374,9 +374,9 @@ class GaussianModel:
     def get_min_distance(self, nodes, target_granularity, leaves_are_negative_infinity = True):
         if nodes.numel() == 1:
             if self.nodes[nodes, hierarchy_node_child_count] == 0 and leaves_are_negative_infinity:
-                return -1000000
+                return torch.full((1,), -1000000.0, device=nodes.device)
             scales = self.scaling_activation(self.properties[nodes.item(), scales1:scales2])
-            return torch.sqrt((scales[ 0] * scales[ 1] + scales[0] * scales[2] + scales[1] * scales[2]))/target_granularity
+            return (torch.sqrt(scales[0] * scales[1] + scales[0] * scales[2] + scales[1] * scales[2]) / target_granularity).unsqueeze(0)
             
         leaves = self.nodes[nodes, hierarchy_node_child_count] == 0
         #return self.scaling_activation(torch.max(self._scaling[nodes], dim=-1)[0])/target_granularity

@@ -110,7 +110,7 @@ def construct_distance_graph(images_file, k=100, llff_hold = 10000000000000):
         
         points = positions
 
-        k = 100
+        k = min(k, len(points) - 1)
         nbrs = NearestNeighbors(n_neighbors=k+1, algorithm='ball_tree').fit(points)
         distances, indices = nbrs.kneighbors(points)
 
