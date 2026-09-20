@@ -1,10 +1,15 @@
 import functools
 import os
+import sys
 
 
 def prepare_gsplat_windows():
     if os.name != "nt":
         return
+
+    scripts_dir = os.path.dirname(sys.executable)
+    if scripts_dir not in os.environ["PATH"].split(os.pathsep):
+        os.environ["PATH"] = scripts_dir + os.pathsep + os.environ["PATH"]
 
     import torch.utils.cpp_extension as cpp_extension
 

@@ -17,6 +17,7 @@ scipy
 tensorboard
 torchviz
 psutil
+ninja
 gsplat
 plyfile
 
