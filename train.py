@@ -30,7 +30,7 @@ if __name__ == '__main__':
     
     parser.add_argument('--output_dir', default="")
     parser.add_argument('--skip_if_exists', action="store_true", default=False, help="Skip coarse training if a scaffold already exists. This is determined by checking if there are any iterations in the scaffold point cloud directory.")
-    parser.add_argument('--export_ply', default="", help="Write every Gaussian from the final hierarchy to this PLY path.")
+    parser.add_argument('--export_ply', default="", help="Write only the finest leaf Gaussians to this PLY path (no ancestor LoDs).")
     args = parser.parse_args()
     
     
@@ -139,3 +139,4 @@ if __name__ == '__main__':
         export_hierarchy_ply(Path(output_dir) / optimization_params.output_file_name, Path(args.export_ply))
     
     print(f"Training finished in {time.time() - start_time:.2f} seconds.")
+

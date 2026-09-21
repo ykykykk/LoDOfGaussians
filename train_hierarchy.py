@@ -8,6 +8,7 @@
 #
 # For inquiries contact  george.drettakis@inria.fr
 #
+from utils.training_runtime import flush_resident_state, make_camera_loader, shutdown_camera_loader
 from utils.general_utils import get_expon_lr_func
 import os
 import torch
@@ -169,7 +170,7 @@ def training(dataset, opt:OptimizationParams, pipe, saving_iterations, view_grap
     iteration = 0
     
     # DONT SHUFFLE WHEN USING CONSISTENCY GRAPH
-    training_generator = DataLoader(scene.getTrainCameras(), num_workers = 8, prefetch_factor = 1, persistent_workers = True, collate_fn=direct_collate, shuffle=not opt.graph_view_select)
+    training_generator = make_camera_loader(scene.getTrainCameras(), opt, shuffle=not opt.graph_view_select)
     if opt.graph_view_select:
         train_camera_data_set = scene.getTrainCameras()
         current_camera_index = list(view_graph.nodes())[0]
@@ -230,10 +231,10 @@ def training(dataset, opt:OptimizationParams, pipe, saving_iterations, view_grap
                     # reset to new random view every 100 iterations
                     if iteration % 100 == 0:
                         current_camera_index = random.randint(0, len(train_camera_data_set) - 1)
-                viewpoint_cam.world_view_transform = viewpoint_cam.world_view_transform.cuda()
-                viewpoint_cam.projection_matrix = viewpoint_cam.projection_matrix.cuda()
-                viewpoint_cam.full_proj_transform = viewpoint_cam.full_proj_transform.cuda()
-                viewpoint_cam.camera_center = viewpoint_cam.camera_center.cuda()
+                viewpoint_cam.world_view_transform = viewpoint_cam.world_view_transform.cuda(non_blocking=True)
+                viewpoint_cam.projection_matrix = viewpoint_cam.projection_matrix.cuda(non_blocking=True)
+                viewpoint_cam.full_proj_transform = viewpoint_cam.full_proj_transform.cuda(non_blocking=True)
+                viewpoint_cam.camera_center = viewpoint_cam.camera_center.cuda(non_blocking=True)
                 
                 
                 xyz_lr = gaussians.xyz_scheduler_args(iteration)
@@ -254,12 +255,12 @@ def training(dataset, opt:OptimizationParams, pipe, saving_iterations, view_grap
                     bounds = gaussians.bounding_sphere_radii
                 else: 
                     bounds = (gaussians.scaling_activation(torch.max(gaussians.upper_tree_scaling, dim=-1)[0]) * 3.0)
-                planes = gaussians.extract_frustum_planes(viewpoint_cam.full_proj_transform.cuda())
+                planes = gaussians.extract_frustum_planes(viewpoint_cam.full_proj_transform.cuda(non_blocking=True))
                 if opt.use_frustum_culling:
                     frustum_cull = lambda indices : gaussians.frustum_cull_spheres(gaussians.upper_tree_xyz[indices], bounds[indices], planes)
                 else:
                     frustum_cull = lambda indices : torch.ones(len(indices), dtype = torch.bool)
-                camera_position = viewpoint_cam.camera_center.cuda()
+                camera_position = viewpoint_cam.camera_center.cuda(non_blocking=True)
                 LOD_detail_cut = lambda indices : gaussians.min_distance_squared[indices] > (camera_position - gaussians.upper_tree_xyz[indices]).square().sum(dim=-1) * distance_multiplier
                 # The coarse cut contains intermediate nodes from the upper tree and leaf nodes, with some leaf nodes containing SPTs
                 coarse_cut = gaussians.cut_hierarchy_on_condition(gaussians.upper_tree_nodes, LOD_detail_cut, return_upper_tree=False, root_node=0, leave_out_of_cut_condition=frustum_cull)
@@ -329,7 +330,7 @@ def training(dataset, opt:OptimizationParams, pipe, saving_iterations, view_grap
                 # Cumulative Sum Trick
                 reuse_gaussians_mask = torch.zeros(len(gaussian_indices)+1, dtype=torch.int32, device='cuda')
                 debug_x = prev_SPT_starts[prev_keep_SPT_cache_indices]
-                if len(debug_x) > 0:
+                if pipe.debug and len(debug_x) > 0:
                     if torch.max(debug_x, 0)[0].item() > len(reuse_gaussians_mask):
                         print("Debug X is bigger than reuse_gaussians_mask")
                     if torch.min(debug_x, 0)[0].item() < 0:
@@ -349,7 +350,8 @@ def training(dataset, opt:OptimizationParams, pipe, saving_iterations, view_grap
                     #LOAD SPT CUT
                     load_SPT_gaussian_indices, load_SPT_starts = get_spt_cut_cuda(len(load_SPT_indices), gaussians.SPT_gaussian_indices, gaussians.SPT_starts, gaussians.SPT_max, gaussians.SPT_min, load_SPT_indices, load_SPT_distances)
                 else:
-                    print("No SPTs loaded")
+                    if pipe.debug:
+                        print("No SPTs loaded")
                     load_SPT_gaussian_indices, load_SPT_starts = torch.empty(0, dtype=torch.int32, device='cuda'), torch.empty(0, dtype=torch.int32, device='cuda')
                 
                 #TODO: Clean up
@@ -371,7 +373,7 @@ def training(dataset, opt:OptimizationParams, pipe, saving_iterations, view_grap
                         load_SPT_indices = load_SPT_indices[:-1]
                 ### BAND AID FIX
                 
-                assert(len(load_SPT_starts.unique()) == len(load_SPT_starts))
+                assert not pipe.debug or len(load_SPT_starts.unique()) == len(load_SPT_starts)
                 cache_SPT_cache_indices = torch.where(~equal_SPT_cache_mask)[0]    
                 cache_SPT_indices = prev_SPT_indices[cache_SPT_cache_indices]
                 SPT_indices = torch.cat((load_SPT_indices, reuse_SPT_indices, cache_SPT_indices))
@@ -392,7 +394,7 @@ def training(dataset, opt:OptimizationParams, pipe, saving_iterations, view_grap
                     sizes = prev_SPT_starts[cache_SPT_cache_indices + 1] - prev_SPT_starts[cache_SPT_cache_indices]
                     SPT_starts_new[-len(sizes):] = torch.cumsum(sizes, dim=0) + number_of_gaussians_to_render
                 
-                assert(len(SPT_starts_new.unique()) == len(SPT_starts_new))
+                assert not pipe.debug or len(SPT_starts_new.unique()) == len(SPT_starts_new)
                 SPT_distances = torch.cat((load_SPT_distances, prev_SPT_distances[prev_keep_SPT_cache_indices], prev_SPT_distances[cache_SPT_cache_indices]))
 
                 load_from_disk_indices = torch.cat((upper_tree_nodes_to_render, load_SPT_gaussian_indices))    
@@ -400,7 +402,7 @@ def training(dataset, opt:OptimizationParams, pipe, saving_iterations, view_grap
                 # Cumulative Sum Trick
                 cache_gaussians_mask = torch.zeros(len(gaussian_indices)+1, dtype=torch.int32, device='cuda')
                 debug_x = prev_SPT_starts[cache_SPT_cache_indices]
-                if len(debug_x) > 0:
+                if pipe.debug and len(debug_x) > 0:
                     if torch.max(debug_x, 0)[0].item() > len(reuse_gaussians_mask):
                         print("Debug X is bigger than reuse_gaussians_mask")
                     if torch.min(debug_x, 0)[0].item() < 0:
@@ -412,9 +414,10 @@ def training(dataset, opt:OptimizationParams, pipe, saving_iterations, view_grap
                 
          
                 # Write back from Cache to CPU Memory
-                if len(gaussian_indices) > opt.cache_size or iteration % opt.clear_cache_interval == 0:
+                periodic_cache_clear = opt.clear_cache_interval > 0 and iteration % opt.clear_cache_interval == 0
+                if len(gaussian_indices) > opt.cache_size or periodic_cache_clear:
                     #  The cache is regularly cleared
-                    if iteration % opt.clear_cache_interval == 0:
+                    if periodic_cache_clear:
                         print("Clear Cache")
                         to_reduce = len(gaussian_indices)
                     else:
@@ -452,7 +455,7 @@ def training(dataset, opt:OptimizationParams, pipe, saving_iterations, view_grap
                 load_from_disk_indices = load_from_disk_indices.to(opt.storage_device)
                 SPT_starts_new += len(upper_tree_nodes_to_render)
                 
-                assert(SPT_starts_new[-1] == len(gaussian_indices))                    
+                assert not pipe.debug or SPT_starts_new[-1] == len(gaussian_indices)                    
                     
                 __hierarchy_cut_time = clock()
                 clock()
@@ -495,7 +498,6 @@ def training(dataset, opt:OptimizationParams, pipe, saving_iterations, view_grap
                     gaussians._contributed[write_back_indices] = contributed_full[write_back_mask].to(opt.storage_device, non_blocking=non_blocking)
                     contributed = torch.cat((contributed[:gaussians.skybox_points], gaussians._contributed[load_from_disk_indices].cuda(non_blocking=non_blocking), contributed_full[reuse_gaussians_mask])).detach()
                     contributed_cache = contributed_full[cache_gaussians_mask]
-                torch.cuda.empty_cache()
 
                 load_tensor = gaussians.properties[load_from_disk_indices, :].cuda(non_blocking=non_blocking)
                 
@@ -545,8 +547,13 @@ def training(dataset, opt:OptimizationParams, pipe, saving_iterations, view_grap
                 del write_back_mask
                 del reuse_gaussians_mask
                 del write_back_indices
-                torch.cuda.empty_cache()
-                torch.cuda.synchronize()
+                # Release remapping temporaries; let the caching allocator reuse blocks.
+                del means3D_full, opacity_full, scales_full, rotations_full
+                del features_dc_full, features_rest_full, write_back_tensors, full_mask
+                if opt.densification == "classic":
+                    del densification_criterium_full
+                if opt.prune_unused:
+                    del contributed_full
                 pre_render_peak = torch.cuda.max_memory_allocated(device='cuda')
                 torch.cuda.reset_peak_memory_stats()
                 # Render
@@ -579,12 +586,12 @@ def training(dataset, opt:OptimizationParams, pipe, saving_iterations, view_grap
                 image = render_pkg["render"]
                 
                 # Loss
-                gt_image = viewpoint_cam.original_image.cuda()
+                gt_image = viewpoint_cam.original_image.cuda(non_blocking=True)
 
                 
                 if viewpoint_cam.alpha_mask is not None:
-                    Ll1 = l1_loss(image * viewpoint_cam.alpha_mask.cuda(), gt_image)
-                    loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - fused_ssim((image * viewpoint_cam.alpha_mask.cuda()).unsqueeze(0), gt_image.unsqueeze(0)))
+                    Ll1 = l1_loss(image * viewpoint_cam.alpha_mask.cuda(non_blocking=True), gt_image)
+                    # The effective upstream loss uses unmasked SSIM below.
                 else:
                     Ll1 = l1_loss(image, gt_image) 
                 
@@ -594,7 +601,7 @@ def training(dataset, opt:OptimizationParams, pipe, saving_iterations, view_grap
                 image_loss = loss.clone().detach()
                 if viewpoint_cam.invdepthmap is not None:
                     invDepth = render_pkg["depth"]
-                    mono_invdepth = viewpoint_cam.invdepthmap.cuda()
+                    mono_invdepth = viewpoint_cam.invdepthmap.cuda(non_blocking=True)
                     Ll1depth_pure = torch.abs((invDepth  - mono_invdepth)).mean()
                     Ll1depth = depth_l1_weight(iteration) * Ll1depth_pure 
                     loss += Ll1depth
@@ -623,16 +630,10 @@ def training(dataset, opt:OptimizationParams, pipe, saving_iterations, view_grap
                 if opt.lambda_scaling > 0 and opt.densification == "MCMC":
                     loss = loss + opt.lambda_scaling * scaling_loss
                     
-                if math.isnan(loss):
-                            torchvision.utils.save_image(image, os.path.join(scene.model_path, "Error" + ".png"))
-                            print("gradients collapsed :(")
-                            continue
-                #make_dot(loss).render("graph", format="png"                
+                loss_scalar = loss.detach().item()
+                if not math.isfinite(loss_scalar):
+                    raise FloatingPointError(f"Non-finite fine-training loss at iteration {iteration}")
                 loss.backward()
-                if math.isnan(loss):
-                        torchvision.utils.save_image(image, os.path.join(scene.model_path, "Error" + ".png"))
-                        print("gradients collapsed :(")
-                        continue
                 __post_backward_peak = torch.cuda.max_memory_allocated(device='cuda')
                 
                 #This needs to happen after backward
@@ -685,7 +686,7 @@ def training(dataset, opt:OptimizationParams, pipe, saving_iterations, view_grap
 
                 with torch.no_grad():
                     # Progress bar
-                    ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
+                    ema_loss_for_log = 0.4 * loss_scalar + 0.6 * ema_loss_for_log
                     if torch.cuda.max_memory_allocated(device='cuda') > __prev_peak_memory:
                         __prev_peak_memory = torch.cuda.max_memory_allocated(device='cuda')
                     __prev_number_rendered = len(gaussian_indices)
@@ -693,6 +694,16 @@ def training(dataset, opt:OptimizationParams, pipe, saving_iterations, view_grap
                         progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "Size": f"{gaussians.size:_}/{gaussians.properties.size(0):_}", "Peak memory": f"{__prev_peak_memory:_}"})
                         progress_bar.update(10)
                     torch.cuda.reset_peak_memory_stats()
+                    # Backing CPU rows must include every current resident value.
+                    if iteration in saving_iterations or iteration == opt.iterations:
+                        flush_resident_state(
+                            gaussians, gaussian_indices,
+                            [means3D, scales, rotations, features_dc, opacity, features_rest],
+                            [means3D_cache, scales_cache, rotations_cache, features_dc_cache, opacity_cache, features_rest_cache],
+                            parameters,
+                            scores=(densification_criterium, densification_criterium_cache) if opt.densification == "classic" else None,
+                            contributed=(contributed, contributed_cache) if opt.prune_unused else None,
+                        )
                     # Log and save
                     if (iteration in saving_iterations):
                         gaussians.save_hierarchy(dataset.output_path, file_name=f"iteration_{iteration}")
@@ -702,6 +713,7 @@ def training(dataset, opt:OptimizationParams, pipe, saving_iterations, view_grap
                     if iteration == opt.iterations:
                         gaussians.save_hierarchy(dataset.output_path, file_name=opt.output_file_name)
                         progress_bar.close()
+                        shutdown_camera_loader(training_generator)
                         return
 
 
@@ -713,38 +725,21 @@ def training(dataset, opt:OptimizationParams, pipe, saving_iterations, view_grap
                         with torch.no_grad():
                             opacity[indices] = 0.1
                         
-                        write_back_tensors = [means3D,  scales, rotations, features_dc.squeeze(1), opacity, features_rest.reshape(len(features_rest), SH_properties)]
-                        caches = [means3D_cache, scales_cache, rotations_cache, features_dc_cache.squeeze(1), opacity_cache, features_rest_cache.reshape(len(features_rest_cache), SH_properties)]
-                        
-                        write_back_tensors_densify = [torch.cat((tensor, cache)) for tensor, cache in zip(write_back_tensors, caches)]
-                        #TODO: Refactor this
-                        #for ADAM_Parameter in ["exp_avgs", "exp_avgs_sqs"]:
-                        for index in range(6):
-                            if index == 5:
-                                write_back_tensors_densify.append(parameters[index]["exp_avgs"].reshape(len(gaussian_indices), SH_properties))
-                            elif index ==3:
-                                write_back_tensors_densify.append(parameters[index]["exp_avgs"].squeeze(1))
-                            else:
-                                write_back_tensors_densify.append(parameters[index]["exp_avgs"])
-                        for index in range(6):
-                            if index == 5:
-                                write_back_tensors_densify.append(parameters[index]["exp_avgs_sqs"].reshape(len(gaussian_indices), SH_properties))
-                            elif index ==3:
-                                write_back_tensors_densify.append(parameters[index]["exp_avgs_sqs"].squeeze(1))
-                            else:
-                                write_back_tensors_densify.append(parameters[index]["exp_avgs_sqs"])
-                        
-                        gaussians.properties[gaussian_indices, :] = torch.cat((write_back_tensors_densify), dim=1).cpu() 
-                        del write_back_tensors
-                        del write_back_tensors_densify
-                        
+                        flush_resident_state(
+                            gaussians, gaussian_indices,
+                            [means3D, scales, rotations, features_dc, opacity, features_rest],
+                            [means3D_cache, scales_cache, rotations_cache, features_dc_cache, opacity_cache, features_rest_cache],
+                            parameters,
+                            scores=(densification_criterium, densification_criterium_cache) if opt.densification == "classic" else None,
+                            contributed=(contributed, contributed_cache) if opt.prune_unused else None,
+                        )
+
                         if opt.densification == "classic":
-                                # Don't write back the densification criterium, it is reset anyway
-                                #gaussians._densification_criterium[gaussian_indices] = torch.cat((densification_criterium, densification_criterium_cache)).to(opt.storage_device)  
+                                # Scores were flushed above; only reset the resident buffers here.
                                 densification_criterium_cache = torch.empty((0), device='cuda', dtype=torch.float32)
                                 densification_criterium = torch.zeros(gaussians.skybox_points, device='cuda', dtype=torch.float32)
                         if opt.prune_unused:
-                            # Don't write back the contributed, it is reset anyway
+                            # Contribution flags were flushed above.
                             contributed_cache = torch.empty((0), device='cuda', dtype=torch.bool)
                             contributed = torch.zeros(gaussians.skybox_points, device='cuda', dtype=torch.bool)
                         prev_SPT_indices, prev_SPT_distances, prev_SPT_starts = torch.empty(0, device='cuda', dtype=torch.int32), torch.empty(0, device='cuda', dtype=torch.float32), torch.empty(0, device='cuda', dtype=torch.int32)
@@ -797,7 +792,7 @@ def training(dataset, opt:OptimizationParams, pipe, saving_iterations, view_grap
                         print(f"Respawn {torch.sum(dead_mask)} Gaussians")
                         gaussians.relocate_gs(dead_mask, gaussians.size, storage_device=opt.storage_device, densification=opt.densification)
                            
-                        gaussians.build_hierarchical_SPT(opt.SPT_root_volume, SPT_Target_Granularity, use_bounding_spheres=opt.use_bounding_spheres, revive_gaussians=Revive_Gaussians)
+                        gaussians.build_hierarchical_SPT(opt.SPT_root_volume, SPT_Target_Granularity, opt.min_SPT_size, use_bounding_spheres=opt.use_bounding_spheres, revive_gaussians=Revive_Gaussians)
                         print(f"Built {len(gaussians.SPT_starts)} SPTs, which contain {len(gaussians.SPT_gaussian_indices)*100/(len(gaussians.SPT_gaussian_indices) + len(gaussians.upper_tree_nodes))} % of Gaussians")
 
                         if opt.densification == "classic":
@@ -899,8 +894,6 @@ def training(dataset, opt:OptimizationParams, pipe, saving_iterations, view_grap
                                 rotations = rotation_matrix_to_quaternion(eigenvectors)
                                 scales = gaussians.scaling_inverse_activation(torch.sqrt(eigenvalues))
                             
-                        if torch.sum(torch.isnan(opacity)) > 0 or torch.sum(torch.isnan(means3D)) > 0 or torch.sum(torch.isnan(scales)) > 0:
-                            pass
                         
                         if opt.noise_lr > 0 and opt.densification == "MCMC":
                             def op_sigmoid(x, k=100, x0=0.995):

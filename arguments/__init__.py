@@ -161,6 +161,10 @@ class OptimizationParams(ParamGroup):
     def __init__(self, parser):
         self.iterations = 100_000
         self.coarse_iterations = 60_000
+        self.data_workers = 4
+        self.data_prefetch_factor = 1
+        self.pin_memory = True
+        self.coarse_fused_ssim = True
         self.SH_degree = 1
         self.SH_increase_after_train_percent = 0.1
         self.lr_multiplier = 1.0

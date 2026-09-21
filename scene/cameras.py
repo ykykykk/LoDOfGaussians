@@ -22,6 +22,10 @@ import torch
 import torch.nn.functional as F
 
 class Camera(nn.Module):
+    def pin_memory(self):
+        from utils.training_runtime import pin_camera_tensors
+        return pin_camera_tensors(self)
+
     def load_gt_image(self):
         image = Image.open(self.image_path)
         resized_image_rgb = PILtoTorch(image, self.resolution)
@@ -120,5 +124,6 @@ class MiniCam:
         view_inv = torch.inverse(self.world_view_transform)
         self.camera_center = view_inv[3][:3]
         self.full_proj_transform_inverse = torch.inverse(self.full_proj_transform)
+
 
 

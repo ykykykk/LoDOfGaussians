@@ -9,6 +9,8 @@
 # For inquiries contact  george.drettakis@inria.fr
 #
 import math
+from fused_ssim import fused_ssim
+from utils.training_runtime import make_camera_loader, shutdown_camera_loader
 import os
 import torch
 from utils.loss_utils import l1_loss, ssim
@@ -53,7 +55,7 @@ def training(dataset, opt, pipe, saving_iterations, checkpoint_iterations, check
     indices = None
 
     iteration = first_iter
-    training_generator = DataLoader(scene.getTrainCameras(), num_workers = 8, prefetch_factor = 1, persistent_workers = True, collate_fn=direct_collate, shuffle=True)
+    training_generator = make_camera_loader(scene.getTrainCameras(), opt, shuffle=True)
 
     
     for param_group in gaussians.optimizer.param_groups:
@@ -65,10 +67,10 @@ def training(dataset, opt, pipe, saving_iterations, checkpoint_iterations, check
             for viewpoint_cam in viewpoint_batch:
                 #viewpoint_cam = scene.getTrainCameras()[first_images[iteration-1]]
                 background = torch.rand((3), dtype=torch.float32, device="cuda")
-                viewpoint_cam.world_view_transform = viewpoint_cam.world_view_transform.cuda()
-                viewpoint_cam.projection_matrix = viewpoint_cam.projection_matrix.cuda()
-                viewpoint_cam.full_proj_transform = viewpoint_cam.full_proj_transform.cuda()
-                viewpoint_cam.camera_center = viewpoint_cam.camera_center.cuda()
+                viewpoint_cam.world_view_transform = viewpoint_cam.world_view_transform.cuda(non_blocking=True)
+                viewpoint_cam.projection_matrix = viewpoint_cam.projection_matrix.cuda(non_blocking=True)
+                viewpoint_cam.full_proj_transform = viewpoint_cam.full_proj_transform.cuda(non_blocking=True)
+                viewpoint_cam.camera_center = viewpoint_cam.camera_center.cuda(non_blocking=True)
 
                 if network_gui.conn == None:
                     network_gui.try_connect()
@@ -113,16 +115,18 @@ def training(dataset, opt, pipe, saving_iterations, checkpoint_iterations, check
                 image = render_pkg["render"]
                 
                 # Loss
-                gt_image = viewpoint_cam.original_image.cuda().float()
+                gt_image = viewpoint_cam.original_image.cuda(non_blocking=True).float()
                 #torchvision.utils.save_image(image, os.path.join(scene.model_path, str(iteration) + ".png"))
                 #torchvision.utils.save_image(gt_image, os.path.join(scene.model_path, "gt_" + str(iteration) + ".png"))
+                loss_image = image
                 if viewpoint_cam.alpha_mask is not None:
-                    alpha_mask = viewpoint_cam.alpha_mask.cuda().float()
-                    Ll1 = l1_loss(image * alpha_mask, gt_image) 
-                    loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image * alpha_mask, gt_image))
+                    loss_image = image * viewpoint_cam.alpha_mask.cuda(non_blocking=True).float()
+                Ll1 = l1_loss(loss_image, gt_image)
+                if getattr(opt, "coarse_fused_ssim", True):
+                    ssim_value = fused_ssim(loss_image.unsqueeze(0), gt_image.unsqueeze(0))
                 else:
-                    Ll1 = l1_loss(image, gt_image) 
-                    loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
+                    ssim_value = ssim(loss_image, gt_image)
+                loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
                 loss.backward()
                 iter_end.record()
 
@@ -141,7 +145,7 @@ def training(dataset, opt, pipe, saving_iterations, checkpoint_iterations, check
 
                     if iteration == opt.coarse_iterations:
                         progress_bar.close()
-                        training_generator._get_iterator()._shutdown_workers()
+                        shutdown_camera_loader(training_generator)
                         return
 
                     # Optimizer step
