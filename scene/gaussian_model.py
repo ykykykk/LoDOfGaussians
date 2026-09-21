@@ -1816,13 +1816,18 @@ class GaussianModel:
         #probs = (self.opacity_activation(self._opacity[alive_indices, 0])) 
         
         if densification == "classic":
-            #probs *= (self._densification_criterium[alive_indices] + 1)
-            #add_idx = alive_indices[torch.where(self._densification_criterium[alive_indices] > 0.001)]
-            #ratio = torch.zeros((self.size, 1), device='cpu', dtype=torch.int32)
-            add_idx = alive_indices[self._densification_criterium[alive_indices] > densify_threshold]
-            if (len(add_idx) * 2) + self.size > cap_max:
-                to_add = max(cap_max - self.size, 0) // 2
-                add_idx = add_idx[: to_add]
+            target_parents = min((num_gs + 1) // 2, max(cap_max - self.size, 0) // 2, len(alive_indices))
+            if target_parents <= 0:
+                return 0
+
+            scores = self._densification_criterium[alive_indices]
+            eligible = scores > densify_threshold
+            if eligible.sum().item() >= target_parents:
+                eligible_indices = torch.where(eligible)[0]
+                selected = eligible_indices[torch.topk(scores[eligible], target_parents).indices]
+            else:
+                selected = torch.topk(scores, target_parents).indices
+            add_idx = alive_indices[selected]
         else:
             # Torch.multionmial can only handle 16_000_000 elements. If there are more possible respawn locations, uniformly sample 16M
             if len(alive_indices) > 16_000_000:
@@ -1844,7 +1849,7 @@ class GaussianModel:
             new_rotation 
         ) = self._update_params(add_idx, ratio=ratio)
         
-        print(f"Spawn {len(add_idx)} new Gaussians")
+        print(f"Spawn {len(add_idx) * 2} new Gaussians")
         new_xyz = new_xyz.repeat_interleave(repeats=2, dim=0)
         new_features_dc = new_features_dc.repeat_interleave(repeats=2, dim=0)
         new_features_rest = new_features_rest.repeat_interleave(repeats=2, dim=0)
