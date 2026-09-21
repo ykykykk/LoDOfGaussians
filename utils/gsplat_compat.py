@@ -13,6 +13,7 @@ def prepare_gsplat_windows():
 
     import torch.utils.cpp_extension as cpp_extension
 
+    cpp_extension.SUBPROCESS_DECODE_ARGS = ("utf-8",)
     original = cpp_extension._jit_compile
     if getattr(original, "_alod_windows_compatible", False):
         return
