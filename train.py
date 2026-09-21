@@ -30,6 +30,8 @@ if __name__ == '__main__':
     parser.add_argument('--export_ply', default="", help="Write only the finest leaf Gaussians to this PLY path (no ancestor LoDs).")
     parser.add_argument('--training_backend', choices=('legacy', 'resident'), default=None,
                         help="Fine-training cache backend; overrides the JSON setting. Existing configs default to legacy.")
+    parser.add_argument('--resident_version', type=int, choices=(1, 2), default=None,
+                        help="Resident runtime version; overrides JSON resident_version (default: 2).")
     parser.add_argument('--seed', type=int, default=None, help="Optional RNG seed for controlled A/B runs.")
     args = parser.parse_args()
 
@@ -67,9 +69,23 @@ if __name__ == '__main__':
     training_function = train_hierarchy.training
     training_kwargs = {}
     if training_backend == "resident":
-        from train_resident import training as training_function, validate_options
-        validate_options(optimization_params, data.get("resident"))
-        training_kwargs["runtime"] = data.get("resident", {})
+        version = args.resident_version or data.get("resident_version", 2)
+        runtime = dict(data.get("resident") or {})
+        if version == 2:
+            from train_resident_v2 import training as training_function, validate_options
+        elif version == 1:
+            from dataclasses import fields
+            from train_resident import training as training_function, validate_options, ResidentOptions
+            allowed = {field.name for field in fields(ResidentOptions)}
+            ignored = sorted(set(runtime) - allowed)
+            if ignored:
+                print("Resident v1 reference: v2-only settings ignored: " + ", ".join(ignored))
+            runtime = {key: value for key, value in runtime.items() if key in allowed}
+        else:
+            raise ValueError("resident_version must be 1 or 2")
+        validate_options(optimization_params, runtime)
+        training_kwargs["runtime"] = runtime
+        print(f"Resident runtime version: {version}")
     print(f"Fine training backend: {training_backend}")
 
     # Choose the scaffold that has been trained the longest.

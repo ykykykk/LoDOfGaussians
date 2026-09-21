@@ -44,7 +44,7 @@
     "clear_cache_interval": 0,
     "llff_hold": 100,
     "vary_distance_multiplier": false,
-    "output_file_name": "sports_shoes_resident.dhier",
+    "output_file_name": "sports_shoes_resident_reference.dhier",
     "data_workers": 4,
     "data_prefetch_factor": 1,
     "pin_memory": true,
@@ -58,13 +58,13 @@
         "pin_staging": true,
         "profile_every": 100,
         "validate_indices": false,
-        "incremental_spt": true,
-        "view_prefetch": true,
-        "gaussian_prefetch_rows": 131072,
+        "incremental_spt": false,
+        "view_prefetch": false,
+        "gaussian_prefetch_rows": 0,
         "image_prefetch_mib": 512,
-        "image_cache_gib": 1.0,
-        "native_ops": "auto",
-        "graph_adam": true,
+        "image_cache_gib": 0.0,
+        "native_ops": "torch",
+        "graph_adam": false,
         "graph_min_reuse": 8
     }
 }
