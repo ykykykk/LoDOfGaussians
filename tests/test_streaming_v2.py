@@ -641,6 +641,21 @@ def test_v2_real_training_control_flow_prefetch_matches_reference(tmp_path, monk
     assert a.saves[-1][2].sum() > 0
     assert len((tmp_path/'True'/'resident_profile.jsonl').read_text().splitlines()) == 17
 
+    # Complete-loop resume: preserve optimizer moments, sampling and iteration.
+    opt.vary_distance_multiplier = False
+    order.clear()
+    for resumed in (False, True):
+        torch.manual_seed(8)
+        tr.training(SimpleNamespace(output_path=str(tmp_path/('resumed' if resumed else 'saved')),
+                    source_path=str(tmp_path), hierarchy=str(tmp_path/'source.dhier'),
+                    white_background=False,resolution=1), opt, SimpleNamespace(debug=True), [],
+                    runtime=dict(profile_every=1, native_ops='torch', view_prefetch=True,
+                                 image_cache_gib=.001, gaussian_prefetch_rows=8, transfer_rows=4,
+                                 checkpoint_every=4),
+                    resume_checkpoint=str(tmp_path/'saved/resident_latest.pt') if resumed else None)
+    assert order[17:] == order[13:17]
+    torch.testing.assert_close(instances[-1].properties, instances[-2].properties, rtol=0, atol=0)
+
 
 def test_prefetch_protects_next_view_hits_not_only_current_view():
     h,s=backing()

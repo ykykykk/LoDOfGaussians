@@ -240,15 +240,20 @@ class CameraTransfer:
 
 class ViewSchedule(torch.utils.data.Sampler):
     """Private RNGs keep lookahead on/off from changing view/RNG order."""
-    def __init__(self, cameras, count, seed, graph=None):
+    def __init__(self, cameras, count, seed, graph=None, start=0):
         self.cameras, self.count, self.seed, self.graph = int(cameras), int(count), int(seed), graph
-        if cameras <= 0 or count < 0:
+        self.start = int(start)
+        if cameras <= 0 or count < 0 or not 0 <= self.start <= self.count:
             raise ValueError("invalid camera schedule")
 
     def __len__(self):
-        return self.count
+        return self.count - self.start
 
     def __iter__(self):
+        from itertools import islice
+        return islice(self._schedule(), self.start, None)
+
+    def _schedule(self):
         if self.graph is not None:
             import random
             rng = random.Random(self.seed)
@@ -273,7 +278,7 @@ class ViewSchedule(torch.utils.data.Sampler):
                 remaining -= take
 
 
-def make_view_loader(cameras, opt, cache_bytes, seed, view_graph=None, compact_images=False):
+def make_view_loader(cameras, opt, cache_bytes, seed, view_graph=None, compact_images=False, start=0):
     from utils.training_runtime import direct_collate
     workers = int(getattr(opt, 'data_workers', 4))
     factor = int(getattr(opt, 'data_prefetch_factor', 1))
@@ -283,7 +288,7 @@ def make_view_loader(cameras, opt, cache_bytes, seed, view_graph=None, compact_i
                            pin_cache=workers == 0 and torch.cuda.is_available(),
                            compact_images=compact_images)
     kwargs = dict(batch_size=1, num_workers=workers, collate_fn=direct_collate,
-                  sampler=ViewSchedule(len(cameras), opt.iterations+1, seed, view_graph),
+                  sampler=ViewSchedule(len(cameras), opt.iterations+1, seed, view_graph, start=start),
                   pin_memory=bool(getattr(opt, 'pin_memory', True)),
                   generator=torch.Generator().manual_seed(seed ^ 0x5A17))
     if workers:

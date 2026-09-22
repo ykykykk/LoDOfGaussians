@@ -33,6 +33,7 @@ if __name__ == '__main__':
     parser.add_argument('--resident_version', type=int, choices=(1, 2), default=None,
                         help="Resident runtime version; overrides JSON resident_version (default: 2).")
     parser.add_argument('--seed', type=int, default=None, help="Optional RNG seed for controlled A/B runs.")
+    parser.add_argument('--resume_checkpoint', default='', help='Resident v2 full-state checkpoint; also use --skip_if_exists.')
     args = parser.parse_args()
 
     if args.seed is not None:
@@ -118,6 +119,10 @@ if __name__ == '__main__':
         training_kwargs["runtime"] = runtime
         print(f"Resident runtime version: {version}")
     print(f"Fine training backend: {training_backend}")
+    if args.resume_checkpoint:
+        if training_backend != 'resident' or version != 2 or not args.skip_if_exists:
+            raise ValueError('Resume requires resident v2 and --skip_if_exists')
+        training_kwargs['resume_checkpoint'] = args.resume_checkpoint
 
     if general and (training_backend != 'resident' or version != 2):
         raise ValueError('General policy requires resident v2')

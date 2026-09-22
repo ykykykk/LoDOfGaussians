@@ -41,10 +41,11 @@ class ResidentOptions:
     graph_adam: bool = True
     graph_min_reuse: int = 8
     adaptive_pool: bool = False
+    checkpoint_every: int = 0
 
     def __post_init__(self):
         if (self.pool_gib <= 0 or self.headroom_gib < 0 or self.transfer_rows <= 0
-                or self.profile_every < 0 or self.gaussian_prefetch_rows < 0
+                or self.checkpoint_every < 0 or self.profile_every < 0 or self.gaussian_prefetch_rows < 0
                 or self.image_prefetch_mib < 0 or self.image_cache_gib < 0 or self.graph_min_reuse < 1):
             raise ValueError("invalid resident budget/prefetch/graph options")
         if self.native_ops not in ("auto", "cuda", "torch"):
@@ -100,19 +101,27 @@ def _backward(packet, camera, g, opt, pipe, background, profile):
     return loss.detach(), raw.grad
 
 
-def training(dataset, opt, pipe, saving_iterations, view_graph=None, runtime=None):
+def training(dataset, opt, pipe, saving_iterations, view_graph=None, runtime=None, resume_checkpoint=None):
     from scene import Scene, GaussianModel
     from utils.general_utils import get_expon_lr_func
     from utils.training_runtime import shutdown_camera_loader
     from train_resident import parameter_rates
     from tqdm import tqdm
     settings = validate_options(opt, runtime)
+    if (settings.checkpoint_every or resume_checkpoint) and opt.vary_distance_multiplier:
+        raise ValueError('Checkpoints require fixed distance multiplier; set checkpoint_every=0 for varying-distance runs')
     g = GaussianModel(opt.SH_degree)
     scene = Scene(dataset, g, resolution_scales=[1], create_from_hier=True, llff_hold=opt.llff_hold)
     g.max_sh_degree, g.active_sh_degree = opt.SH_degree, min(1, opt.SH_degree)
     for name in ('_xyz', '_opacity', '_rotation', '_scaling', '_features_dc', '_features_rest'):
         getattr(g, name).requires_grad_(False)
     g.compact_gaussians('cpu', opt.cap_max, densification='classic', prune_unused_gaussians=False)
+    from utils.resident_checkpoint import load_checkpoint, save_checkpoint
+    contract = (dict(source=str(Path(dataset.source_path).resolve()), resolution=dataset.resolution,
+                    hierarchy=str(Path(dataset.hierarchy).resolve()), options=vars(opt), pipeline=vars(pipe))
+                if settings.checkpoint_every or resume_checkpoint else {})
+    restored = load_checkpoint(resume_checkpoint, g, contract, opt.iterations) if resume_checkpoint else None
+    first_iteration = restored['iteration'] + 1 if restored else 0
     cameras = scene.getTrainCameras()
     if not len(cameras):
         raise ValueError('no training cameras')
@@ -146,12 +155,12 @@ def training(dataset, opt, pipe, saving_iterations, view_graph=None, runtime=Non
                                  ops=native, prefetch_rows=settings.gaussian_prefetch_rows)
     output = Path(dataset.output_path)
     output.mkdir(parents=True, exist_ok=True)
-    profile = TrainingProfile(output / 'resident_profile.jsonl', settings.profile_every)
-    seed = torch.initial_seed()
+    profile = TrainingProfile(output / 'resident_profile.jsonl', settings.profile_every, append=bool(restored))
+    seed = restored['seed'] if restored else torch.initial_seed()
     loader = make_view_loader(cameras, opt, settings.image_cache_gib * 2**30, seed,
                               view_graph if opt.graph_view_select else None,
-                              compact_images=settings.compact_images)
-    views = ThreadedViews(loader, opt.iterations + 1, enabled=settings.view_prefetch)
+                              compact_images=settings.compact_images, start=first_iteration)
+    views = ThreadedViews(loader, opt.iterations + 1 - first_iteration, enabled=settings.view_prefetch)
     transfer = CameraTransfer(prefetch_bytes=settings.image_prefetch_mib * 2**20)
     adam_graph = PacketAdamGraph(settings.graph_min_reuse)
     distance_rng = torch.Generator().manual_seed(seed ^ 0x19C3)
@@ -168,13 +177,22 @@ def training(dataset, opt, pipe, saving_iterations, view_graph=None, runtime=Non
         iterations=opt.iterations, seed=seed, optimization=vars(opt),
         scene_radius=g.spatial_lr_scale, spt_root_volume=root_volume, lod_base_focal=base_focal), indent=2), encoding='utf-8')
     print(f'Resident v2: {capacity:,} slots; native={native is not None}; incremental_spt={settings.incremental_spt}')
-    progress = tqdm(total=opt.iterations+1, desc='Resident v2 fine training')
+    progress = tqdm(total=opt.iterations+1, initial=first_iteration, desc='Resident v2 fine training')
     ticket = None
     tracker = DetailWindow(opt.cap_max, pool.device) if getattr(opt, 'detail_diagnostics', False) else None
     g._detail_tracker = tracker
-    detail_file = (output / 'densification.jsonl').open('w', encoding='utf-8')
+    detail_file = (output / 'densification.jsonl').open('a' if restored else 'w', encoding='utf-8')
     empty_windows = 0
     ema, started = 0.0, time.perf_counter()
+    if restored:
+        if tracker and restored['seen'] is not None:
+            tracker.seen[:g.size].copy_(restored['seen'])
+            tracker.views = restored['views']
+        ema, empty_windows = restored['ema'], restored['empty_windows']
+        torch.set_rng_state(restored['rng'])
+        torch.cuda.set_rng_state_all(restored['cuda_rng'])
+        print(f'Resumed resident checkpoint after iteration {first_iteration-1}')
+        del restored
 
     def select(ticket, iteration):
         if ticket.multiplier is None:
@@ -188,7 +206,7 @@ def training(dataset, opt, pipe, saving_iterations, view_graph=None, runtime=Non
         return ticket.ids
 
     try:
-        for iteration in range(opt.iterations+1):
+        for iteration in range(first_iteration, opt.iterations+1):
             profile.begin(iteration)
             with profile.phase('data_wait'):
                 if ticket is None:
@@ -279,6 +297,12 @@ def training(dataset, opt, pipe, saving_iterations, view_graph=None, runtime=Non
                             packet.adam_step(grad, rates, iteration, frozen_prefix=g.skybox_points)
                 del packet, grad
             ticket = next_ticket
+            if settings.checkpoint_every and iteration > 0 and iteration < opt.iterations and iteration % settings.checkpoint_every == 0:
+                with profile.phase('checkpoint'):
+                    pool.flush()
+                    save_checkpoint(output / 'resident_latest.pt', g, iteration, contract,
+                                    seed, tracker, ema, empty_windows)
+                    print(f'Resident checkpoint saved after iteration {iteration}', flush=True)
             if iteration % 10 == 0:
                 hit = pool.stats['hit_rows'] / max(pool.stats['requested_rows'], 1)
                 progress.set_postfix(loss=f'{ema:.6f}', active=active_count, total=g.size, hit=f'{hit:.1%}')

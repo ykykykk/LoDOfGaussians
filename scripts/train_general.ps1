@@ -11,7 +11,8 @@ param(
     [string]$VcVarsAll = '',
     [string]$Toolset = '14.44',
     [switch]$PlanOnly,
-    [switch]$SkipIfExists
+    [switch]$SkipIfExists,
+    [string]$ResumeCheckpoint = ''
 )
 $ErrorActionPreference = 'Stop'
 [Console]::InputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
@@ -39,6 +40,8 @@ if (-not $PlanOnly) {
 }
 $env:PYTHONUTF8 = '1'
 $env:PYTHONIOENCODING = 'utf-8'
+$env:PYTHONUNBUFFERED = '1'
+$env:PYTHONFAULTHANDLER = '1'
 $env:DISTUTILS_USE_SDK = '1'
 $env:MSSdk = '1'
 $env:VSLANG = '1033'
@@ -51,5 +54,6 @@ if ($Iterations -gt 0) { $TrainArgs += @('--iterations',"$Iterations") }
 if ($CoarseIterations -gt 0) { $TrainArgs += @('--coarse_iterations',"$CoarseIterations") }
 if ($PlanOnly) { $TrainArgs += '--plan_only' }
 if ($SkipIfExists) { $TrainArgs += '--skip_if_exists' }
+if ($ResumeCheckpoint) { $TrainArgs += @('--resume_checkpoint', $ResumeCheckpoint) }
 & $Python @TrainArgs
 if ($LASTEXITCODE -ne 0) { throw "Training exited with code $LASTEXITCODE" }

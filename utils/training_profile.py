@@ -8,12 +8,12 @@ import torch
 
 
 class TrainingProfile:
-    def __init__(self, path, every=100, device="cuda"):
+    def __init__(self, path, every=100, device="cuda", append=False):
         if every < 0:
             raise ValueError("profile interval must be nonnegative")
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.handle = self.path.open("w", encoding="utf-8")
+        self.handle = self.path.open("a" if append else "w", encoding="utf-8")
         self.every = int(every)
         self.device = torch.device(device)
         self.pending = []
