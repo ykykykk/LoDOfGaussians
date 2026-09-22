@@ -34,7 +34,7 @@ class PacketAdamGraph:
     @torch.no_grad()
     def step(self, packet, grad, rates, iteration, frozen_prefix=0):
         from utils.resident_pool_v2 import IndexedPacket
-        if isinstance(packet, IndexedPacket) or not packet.state.is_cuda:
+        if packet.ops is not None or isinstance(packet, IndexedPacket) or not packet.state.is_cuda:
             return False
         key = (packet.state.data_ptr(), tuple(packet.state.shape), frozen_prefix)
         if key != self.key:

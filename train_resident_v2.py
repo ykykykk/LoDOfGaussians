@@ -129,12 +129,17 @@ def training(dataset, opt, pipe, saving_iterations, view_graph=None, runtime=Non
     width = g.properties.shape[1] // 3
     def choose_capacity(existing_bytes=0):
         free, _ = torch.cuda.mem_get_info()
-        reusable = max(0, torch.cuda.memory_reserved() - torch.cuda.memory_allocated())
+        allocated = torch.cuda.memory_allocated()
+        reusable = max(0, torch.cuda.memory_reserved() - allocated)
+        # Retain space for observed transient render/backward allocations.
+        # A new, denser view can still exceed this historical peak.
+        transient = max(0, torch.cuda.max_memory_allocated() - allocated)
+        headroom = max(settings.headroom_gib, (transient * 1.25 + 2**30) / 2**30)
         requested = min(opt.cache_size, opt.cap_max)
         if settings.adaptive_pool:
             requested = min(requested, g.size + max(65536, g.size // 4))
         return capacity_for_budget(requested, width, free + reusable + existing_bytes,
-                                   settings.pool_gib, settings.headroom_gib)
+                                   settings.pool_gib, headroom)
     capacity = choose_capacity()
     pool = StreamingResidentPool(g.properties, g._densification_criterium, capacity,
                                  transfer_rows=settings.transfer_rows, pin_staging=settings.pin_staging,

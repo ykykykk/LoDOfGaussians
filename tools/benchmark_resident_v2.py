@@ -20,6 +20,7 @@ def main():
     parser.add_argument('--degree', type=int, choices=(0,1,2,3), default=1)
     parser.add_argument('--steps', type=int, default=200)
     parser.add_argument('--warmup', type=int, default=20)
+    parser.add_argument('--overflow', action='store_true', help='Benchmark an active cut exceeding cache capacity')
     parser.add_argument('--output', type=Path, default=Path('resident_adam_benchmark.json'))
     args = parser.parse_args()
     if args.rows <= 0 or args.steps <= 0 or args.warmup < 0:
@@ -39,7 +40,7 @@ def main():
     results, final = {}, []
     for name, ops in [('torch', None), ('indexed_cuda', native)]:
         host = source.clone()
-        pool = StreamingResidentPool(host, torch.zeros(args.rows), args.rows,
+        pool = StreamingResidentPool(host, torch.zeros(args.rows), 0 if args.overflow else args.rows,
                                      ops=ops, prefetch_rows=0)
         try:
             packet = pool.acquire(np.arange(args.rows, dtype=np.int64))
@@ -61,6 +62,7 @@ def main():
         del packet, pool
     torch.testing.assert_close(final[0], final[1], rtol=5e-4, atol=3e-5)
     report = dict(kind='isolated_adam_only', rows=args.rows, degree=args.degree, steps=args.steps,
+                  overflow=args.overflow,
                   gpu=torch.cuda.get_device_name(), torch=torch.__version__, cuda=torch.version.cuda,
                   results=results, parity='passed',
                   adam_speed_ratio=results['torch']['ms_per_adam']/results['indexed_cuda']['ms_per_adam'],

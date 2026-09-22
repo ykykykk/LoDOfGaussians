@@ -18,19 +18,20 @@ __global__ void gather_kernel(const float* state, const int64_t* slots, float* r
 
 __global__ void adam_kernel(float* state, const int64_t* slots, float* raw,
                             const float* grad, const float* rates, const bool* frozen,
-                            int64_t elements, int64_t width, int64_t capacity,
+                            int64_t elements, int64_t width, int64_t capacity, int64_t raw_stride,
                             float correction1, float correction2_sqrt) {
     const int64_t i = int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i >= elements) return;
     const int64_t row = i / width, col = i % width, slot = slots[row];
     if (slot < 0 || slot >= capacity) return;
     const int64_t base = slot * (3 * width) + col;
+    const int64_t raw_index = row * raw_stride + col;
     const float g = frozen[row] ? 0.f : grad[i];
     const float m = state[base + width] * 0.9f + g * 0.1f;
     const float v = state[base + 2 * width] * 0.999f + g * g * 0.001f;
     const float denominator = sqrtf(v) / correction2_sqrt + 1e-8f;
-    const float p = raw[i] - (m / denominator) * (rates[col] / correction1);
-    state[base] = raw[i] = p;
+    const float p = raw[raw_index] - (m / denominator) * (rates[col] / correction1);
+    state[base] = raw[raw_index] = p;
     state[base + width] = m;
     state[base + 2 * width] = v;
 }
@@ -98,10 +99,12 @@ void indexed_adam_cuda(torch::Tensor state, torch::Tensor slots, torch::Tensor r
                        torch::Tensor grad, torch::Tensor rates, torch::Tensor frozen,
                        double correction1, double correction2_sqrt) {
     check_state(state, slots);
-    CUDA_CONTIG(raw); CUDA_CONTIG(grad); CUDA_CONTIG(rates); CUDA_CONTIG(frozen);
+    CUDA_CONTIG(grad); CUDA_CONTIG(rates); CUDA_CONTIG(frozen);
     FP32(raw); FP32(grad); FP32(rates);
     const int64_t d = state.size(1) / 3, n = slots.numel();
     TORCH_CHECK(raw.dim() == 2 && raw.size(0) == n && raw.size(1) == d && grad.sizes() == raw.sizes(), "invalid raw/gradient dimensions");
+    // Overflow packets expose parameters as a strided view of [p | m | v].
+    TORCH_CHECK(raw.is_cuda() && raw.stride(1) == 1 && raw.stride(0) >= d, "invalid raw strides");
     TORCH_CHECK(rates.dim() == 1 && rates.numel() == d, "invalid learning rates");
     TORCH_CHECK(frozen.dim() == 1 && frozen.numel() == n && frozen.scalar_type() == torch::kBool, "invalid frozen mask");
     TORCH_CHECK(raw.device() == state.device() && grad.device() == state.device()
@@ -112,7 +115,7 @@ void indexed_adam_cuda(torch::Tensor state, torch::Tensor slots, torch::Tensor r
         adam_kernel<<<(n*d + 255) / 256, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
             state.data_ptr<float>(), slots.data_ptr<int64_t>(), raw.data_ptr<float>(),
             grad.data_ptr<float>(), rates.data_ptr<float>(), frozen.data_ptr<bool>(),
-            n*d, d, state.size(0), float(correction1), float(correction2_sqrt));
+            n*d, d, state.size(0), raw.stride(0), float(correction1), float(correction2_sqrt));
         C10_CUDA_KERNEL_LAUNCH_CHECK();
     }
 }

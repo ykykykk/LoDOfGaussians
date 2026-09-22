@@ -19,6 +19,7 @@ class ActivePacket:
     state: torch.Tensor
     scores: torch.Tensor
     dirty: bool = False
+    ops: object = None
 
     @property
     def width(self) -> int:
@@ -48,6 +49,18 @@ class ActivePacket:
             raise ValueError("Adam gradient/rate dimensions do not match the packet")
         if iteration < 0:
             raise ValueError("iteration must be nonnegative")
+        if self.ops is not None:
+            if not hasattr(self, '_native_slots'):
+                self._native_slots = torch.arange(len(self.ids), device=self.state.device)
+            if getattr(self, '_native_frozen_prefix', None) != frozen_prefix:
+                self._native_frozen = torch.as_tensor(self.ids < frozen_prefix, device=self.state.device)
+                self._native_frozen_prefix = frozen_prefix
+            step = iteration + 1
+            self.ops.indexed_adam(self.state, self._native_slots, self.state[:, :d],
+                grad.contiguous(), rates.contiguous(), self._native_frozen,
+                1 - 0.9 ** step, math.sqrt(1 - 0.999 ** step))
+            self.dirty = True
+            return
         if frozen_prefix:
             frozen = torch.as_tensor(self.ids < frozen_prefix, device=grad.device)
             grad = grad.clone()

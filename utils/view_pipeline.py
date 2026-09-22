@@ -72,6 +72,11 @@ class CachedCameras(torch.utils.data.Dataset):
                     packed = (tensor * 255.).round().to(torch.uint8)
                     # Soft masks and higher-precision inputs must not be quantized.
                     if torch.equal(packed.float().div_(255.), tensor):
+                        if name == 'alpha_mask' and bool((packed == 255).all()):
+                            # An opaque mask changes neither target nor loss;
+                            # omit its upload and full-resolution multiply.
+                            camera.alpha_mask = None
+                            continue
                         setattr(camera, name, packed)
                         fields.append(name)
             camera._byte_image_fields = tuple(fields)

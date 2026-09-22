@@ -305,6 +305,24 @@ def test_byte_cache_preserves_premultiplied_soft_alpha_targets():
     torch.testing.assert_close(packed.original_image, source.original_image, rtol=0, atol=0)
 
 
+def test_opaque_mask_elision_preserves_loss_and_gradient():
+    from utils.view_pipeline import restore_image_tensor
+    source = camera()
+    packed = CachedCameras([source], 8192, compact_images=True)[0]
+    assert packed.alpha_mask is None and source.alpha_mask is not None
+    assert 'alpha_mask' not in packed._byte_image_fields
+    target = restore_image_tensor(packed, 'original_image', packed.original_image)
+    image = torch.rand_like(target, requires_grad=True)
+    old_loss = (image * source.alpha_mask - source.original_image).abs().mean()
+    new_loss = (image - target).abs().mean()
+    torch.testing.assert_close(new_loss, old_loss, rtol=0, atol=0)
+    torch.testing.assert_close(torch.autograd.grad(old_loss, image)[0],
+                               torch.autograd.grad(new_loss, image)[0], rtol=0, atol=0)
+    source.alpha_mask[..., 0] = 0
+    masked = CachedCameras([source], 8192, compact_images=True)[0]
+    assert masked.alpha_mask is not None
+
+
 @pytest.mark.parametrize('threaded', [False, True])
 def test_cpu_view_lookahead_order_and_exhaustion(threaded):
     views = ThreadedViews([[camera(i)] for i in range(3)], count=8, enabled=threaded)
@@ -338,23 +356,26 @@ def test_adam_graph_math_matches_reference_dynamic_rates_steps():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason='requires CUDA and a C++/CUDA toolchain')
-def test_cuda_indexed_adam_and_async_prefetch_values():
+@pytest.mark.parametrize('capacity', [0, 2, 8])
+def test_cuda_indexed_adam_and_async_prefetch_values(capacity):
     from utils.resident_native import load_native
     native = load_native('cuda')
     host, scores = backing()
     expected = host.clone()
-    pool = StreamingResidentPool(host, scores, 8, device='cuda', ops=native,
+    pool = StreamingResidentPool(host, scores, capacity, device='cuda', ops=native,
                                  transfer_rows=2, prefetch_rows=4)
-    cuts = ([0,1,2], [2,3,4], [4,7,8], [0,9,10])
+    cuts = ([0,1], [1,2,3], [1,2,3], [0,9,10], [1])
     for step, ids in enumerate(cuts):
         packet = pool.acquire(ids)
         if step+1 < len(cuts):
             pool.prefetch(cuts[step+1])
         grad = torch.randn(len(ids),23)
         rates = torch.linspace(.00001,.003,23)
-        packet.adam_step(grad.cuda(), rates.cuda(), step, 1)
+        frozen_prefix = 1 if step % 2 == 0 else 3
+        packet.adam_step(grad.cuda(), rates.cuda(), step, frozen_prefix)
+        assert not PacketAdamGraph(minimum_reuse=1).step(packet, grad.cuda(), rates.cuda(), step, frozen_prefix)
         ref = ActivePacket(np.array(ids), None, expected[ids].clone(), torch.zeros(len(ids)))
-        ref.adam_step(grad, rates, step, 1)
+        ref.adam_step(grad, rates, step, frozen_prefix)
         expected[ids] = ref.state
     pool.close()
     torch.testing.assert_close(host, expected, rtol=2e-5, atol=3e-6)

@@ -20,6 +20,8 @@ def load_native(mode="auto"):
         try:
             if not torch.cuda.is_available():
                 raise RuntimeError("CUDA is unavailable")
+            from utils.gsplat_compat import prepare_gsplat_windows
+            prepare_gsplat_windows()
             os.environ.setdefault("MAX_JOBS", "4")
             from torch.utils.cpp_extension import load
             root = Path(__file__).resolve().parents[1] / "csrc"

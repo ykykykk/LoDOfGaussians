@@ -91,7 +91,9 @@ class StreamingResidentPool(ResidentPool):
             self.stats["prefetch_hit_rows"] += len(used)
             self._prefetched.difference_update(used)
         if self.ops is None or len(ids) > self.capacity:
-            return super()._acquire_cpu(ids, validate)
+            packet = super()._acquire_cpu(ids, validate)
+            packet.ops = self.ops
+            return packet
         if ids.ndim != 1 or ids.dtype.kind not in "iu":
             raise ValueError("Gaussian IDs must be a one-dimensional integer array")
         ids = ids.astype(np.int64, copy=False)

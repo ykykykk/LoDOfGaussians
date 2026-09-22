@@ -52,8 +52,8 @@
   "training_backend": "resident",
   "resident_version": 2,
   "resident": {
-    "pool_gib": 2.5,
-    "headroom_gib": 4.0,
+    "pool_gib": 8.0,
+    "headroom_gib": 6.0,
     "transfer_rows": 65536,
     "pin_staging": true,
     "profile_every": 100,

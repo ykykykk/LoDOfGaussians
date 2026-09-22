@@ -76,6 +76,8 @@ Windows fork: see the [general training guide](Docs/General_Training.md) for the
 
 For full-resolution input, see the [lossless image-cache benchmark and command](Docs/FullResolution_20260923.md).
 
+See [single-GPU large-point-count optimization](Docs/SingleCard_20260923.md) for resident memory budgets, fused overflow updates, and full-resolution workspace measurements.
+
 #### Dataset 
 Prepare your dataset in the standard 3DGS format:
 ```
