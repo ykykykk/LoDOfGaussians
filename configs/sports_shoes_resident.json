@@ -22,7 +22,7 @@
     "opacity_reset_interval": 100000000000.0,
     "densify_from_iter": 500,
     "densify_until_iter": 16000,
-    "densify_grad_threshold": 5e-06,
+    "densify_grad_threshold": 0.001,
     "depth_l1_weight_init": 1.0,
     "depth_l1_weight_final": 0.01,
     "noise_lr": 100000.0,
@@ -36,7 +36,7 @@
     "use_frustum_culling": true,
     "storage_device": "cpu",
     "SPT_root_volume": 25,
-    "target_granularity_pixels": 2,
+    "target_granularity_pixels": 1,
     "min_SPT_size": 256,
     "use_GPU_caching": true,
     "cache_size": 8000000,
@@ -65,6 +65,18 @@
         "image_cache_gib": 1.0,
         "native_ops": "auto",
         "graph_adam": true,
-        "graph_min_reuse": 8
+        "graph_min_reuse": 8,
+        "adaptive_pool": true
+    },
+    "densify_score_space": "ndc",
+    "densify_max_leaf_fraction": 0.15,
+    "densify_max_new_nodes": 200000,
+    "SPT_relative_volume": 0.001,
+    "lod_pixel_consistent": true,
+    "detail_diagnostics": true,
+    "general_policy": {
+        "enabled": true,
+        "auto_image_io": true,
+        "image_cache_max_gib": 8
     }
 }

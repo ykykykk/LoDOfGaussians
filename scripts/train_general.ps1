@@ -4,6 +4,7 @@ param(
     [Parameter(Mandatory)][string]$Data,
     [Parameter(Mandatory)][string]$Output,
     [int]$Resolution = 2,
+    [string]$Config = 'general_balanced.json',
     [int]$Iterations = 0,
     [int]$CoarseIterations = 0,
     [int]$Seed = 0,
@@ -13,6 +14,8 @@ param(
     [switch]$SkipIfExists
 )
 $ErrorActionPreference = 'Stop'
+[Console]::InputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$OutputEncoding = [Console]::OutputEncoding
 $Root = Split-Path -Parent $PSScriptRoot
 Set-Location -LiteralPath $Root
 $Python = Join-Path $Root '.venv/Scripts/python.exe'
@@ -42,7 +45,7 @@ $env:VSLANG = '1033'
 $env:MAX_JOBS = '4'
 $env:PYTHONDONTWRITEBYTECODE = '1'
 $TrainArgs = @('train.py','--project_dir',$Data,'--output_dir',$Output,
-    '--config','general_balanced.json','--resolution',"$Resolution",'--seed',"$Seed",
+    '--config',$Config,'--resolution',"$Resolution",'--seed',"$Seed",
     '--export_ply',(Join-Path $Output 'scene_finest.ply'))
 if ($Iterations -gt 0) { $TrainArgs += @('--iterations',"$Iterations") }
 if ($CoarseIterations -gt 0) { $TrainArgs += @('--coarse_iterations',"$CoarseIterations") }

@@ -30,9 +30,10 @@ def camera_bytes(camera):
 
 class CachedCameras(torch.utils.data.Dataset):
     """Per-worker LRU, with the total configured budget divided by workers."""
-    def __init__(self, dataset, max_bytes):
+    def __init__(self, dataset, max_bytes, pin_cache=False):
         self.dataset = dataset
         self.max_bytes = max(0, int(max_bytes))
+        self.pin_cache = pin_cache
         self.cache = OrderedDict()
         self.used_bytes = 0
         self.hits = self.misses = 0
@@ -56,6 +57,18 @@ class CachedCameras(torch.utils.data.Dataset):
             while self.cache and self.used_bytes + size > self.max_bytes:
                 _, (_, old_size) = self.cache.popitem(last=False)
                 self.used_bytes -= old_size
+            if self.pin_cache:
+                camera = copy(camera)
+                for name in TENSORS:
+                    tensor = getattr(camera, name, None)
+                    if isinstance(tensor, torch.Tensor):
+                        setattr(camera, name, tensor.pin_memory())
+                size = camera_bytes(camera)
+                if size > self.max_bytes:
+                    return copy(camera)
+                while self.cache and self.used_bytes + size > self.max_bytes:
+                    _, (_, old_size) = self.cache.popitem(last=False)
+                    self.used_bytes -= old_size
             self.cache[index] = (copy(camera), size)
             self.used_bytes += size
         return copy(camera)
@@ -232,7 +245,8 @@ def make_view_loader(cameras, opt, cache_bytes, seed, view_graph=None):
     factor = int(getattr(opt, 'data_prefetch_factor', 1))
     if workers < 0 or factor < 1:
         raise ValueError("invalid DataLoader worker/prefetch configuration")
-    dataset = CachedCameras(cameras, max(0, int(cache_bytes)) // max(1, workers))
+    dataset = CachedCameras(cameras, max(0, int(cache_bytes)) // max(1, workers),
+                           pin_cache=workers == 0 and torch.cuda.is_available())
     kwargs = dict(batch_size=1, num_workers=workers, collate_fn=direct_collate,
                   sampler=ViewSchedule(len(cameras), opt.iterations+1, seed, view_graph),
                   pin_memory=bool(getattr(opt, 'pin_memory', True)),

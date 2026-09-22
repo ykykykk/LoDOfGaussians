@@ -135,15 +135,32 @@ def test_loader_rejects_empty_dataset_and_invalid_worker_count():
         make_camera_loader([1], SimpleNamespace(data_workers=-1), shuffle=False)
 
 
-def test_classic_densification_restores_upstream_threshold_selection():
-    path = ROOT / "scene" / "gaussian_model.py"
-    if not path.exists():
-        pytest.skip("Full repository source is required for this integration guard")
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    method = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "add_new_gs")
-    source = ast.unparse(method)
-    assert "topk" not in source
-    assert "alive_indices[self._densification_criterium[alive_indices] > densify_threshold]" in source
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA relocation required")
+def test_classic_split_separates_children_and_prioritizes_detail():
+    from scene.gaussian_model import GaussianModel
+    g = GaussianModel(1)
+    g.size = 3
+    g.properties = torch.zeros(7, 69)
+    g.properties[:3, 3:6] = torch.tensor([2., 1., .5]).log()
+    # Rotate the longest local axis from X to Y.
+    g.properties[:3, 6:10] = torch.tensor([2**-.5, 0., 0., 2**-.5])
+    g.properties[:3, 13] = torch.logit(torch.tensor(.8))
+    g.nodes = torch.zeros(7, 6, dtype=torch.int32)
+    g._densification_criterium = torch.tensor([.2, .8, .5, 0., 0., 0., 0.])
+    parent = g.properties[1, :23].clone()
+    # Even with densify_percent=1, classic follows the detail threshold.
+    assert g.add_new_gs(5, 3, 'classic', densify_percent=1., densify_threshold=.1) == 2
+    assert g.size == 5 and g.nodes[1, 2] == 2
+    assert g.nodes[0, 2] == 0 and g.nodes[2, 2] == 0
+    children = g.properties[3:5]
+    torch.testing.assert_close(children[:, :3].mean(0), parent[:3])
+    assert children[0, 1] < 0 < children[1, 1]
+    torch.testing.assert_close(children[:, 0], torch.zeros(2), atol=1e-6, rtol=0)
+    torch.testing.assert_close(children[:, 1].square() + children[:, 3].exp().square(),
+                               parent[3].exp().square().expand(2))
+    assert torch.isfinite(children).all()
+    assert g.add_new_gs(6, 5, 'classic', densify_threshold=.1) == 0
+    assert g.add_new_gs(7, 5, 'classic', densify_threshold=1.) == 0
 
 
 def test_training_flushes_before_save_and_before_densification_reset():

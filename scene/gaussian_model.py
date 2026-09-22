@@ -1678,7 +1678,7 @@ class GaussianModel:
             scale_old=self.scaling_activation(self.properties[idxs, scales1:scales2]).cuda(),
             N=ratio[idxs, 0].cuda() + 1
         )
-        new_opacity = torch.clamp(new_opacity.unsqueeze(-1), max=1.0 - 0.00000001 , min=0.005)
+        new_opacity = torch.clamp(new_opacity.unsqueeze(-1), max=1.0 - torch.finfo(new_opacity.dtype).eps, min=0.005)
         new_opacity = self.inverse_opacity_activation(new_opacity)
         new_scaling = self.scaling_inverse_activation(new_scaling.reshape(-1, 3))
         return self.properties[idxs, xyz1:xyz2], self.properties[idxs, features1:features2], self.properties[idxs, features_rest1:features_rest2], new_opacity, new_scaling, self.properties[idxs, rotation1:rotation2]
@@ -1808,7 +1808,7 @@ class GaussianModel:
         device = self.properties.device
         target_num = min(cap_max, int(densify_percent * size))
         num_gs = max(0, target_num - size)
-        if num_gs <= 0:
+        if cap_max - size < 2 or (densification != "classic" and num_gs <= 0):
             return 0
         
         # Only Leaf nodes can be used for respawning 
@@ -1820,14 +1820,9 @@ class GaussianModel:
             #probs *= (self._densification_criterium[alive_indices] + 1)
             #add_idx = alive_indices[torch.where(self._densification_criterium[alive_indices] > 0.001)]
             #ratio = torch.zeros((self.size, 1), device='cpu', dtype=torch.int32)
-            add_idx = alive_indices[self._densification_criterium[alive_indices] > densify_threshold]
-            if max_leaf_fraction or max_new_nodes:
-                from utils.general_policy import eligible_parents
-                add_idx = eligible_parents(self._densification_criterium, alive_indices, densify_threshold,
-                    max(0, cap_max - self.size), max_leaf_fraction, max_new_nodes)
-            if (len(add_idx) * 2) + self.size > cap_max:
-                to_add = max(cap_max - self.size, 0) // 2
-                add_idx = add_idx[: to_add]
+            from utils.general_policy import eligible_parents
+            add_idx = eligible_parents(self._densification_criterium, alive_indices, densify_threshold,
+                max(0, cap_max - size), max_leaf_fraction, max_new_nodes)
         else:
             # Torch.multionmial can only handle 16_000_000 elements. If there are more possible respawn locations, uniformly sample 16M
             if len(alive_indices) > 16_000_000:
@@ -1839,6 +1834,8 @@ class GaussianModel:
             if (len(add_idx) * 2) + self.size > cap_max:
                 to_add = max(cap_max - self.size, 0) // 2
                 add_idx = add_idx[: to_add]
+        if not len(add_idx):
+            return 0
         ratio = torch.zeros((self.size, 1), device=device, dtype=torch.int32)
         ratio[add_idx] = 1
         (   new_xyz, 
@@ -1849,8 +1846,23 @@ class GaussianModel:
             new_rotation 
         ) = self._update_params(add_idx, ratio=ratio)
         
-        print(f"Spawn {len(add_idx)} new Gaussians")
+        # Separate classic children along the parent's longest local axis.
+        # Preserve the centre and that axis's second moment after scale shrinkage.
+        # MCMC keeps its relocation initialization and subsequent position noise.
+        if densification == "classic":
+            parent_scale = self.properties[add_idx, scales1:scales2].exp()
+            axis = parent_scale.argmax(dim=1)
+            rows = torch.arange(len(add_idx), device=device)
+            child_scale = new_scaling.to(device).exp()
+            distance = (parent_scale[rows, axis].square() - child_scale[rows, axis].square()).clamp_min(0).sqrt()
+            rotation = build_rotation(new_rotation.cuda()).to(device)
+            offset = rotation[rows, :, axis] * distance[:, None]
+
+        print(f"Split {len(add_idx)} parents; add {2 * len(add_idx)} nodes")
         new_xyz = new_xyz.repeat_interleave(repeats=2, dim=0)
+        if densification == "classic":
+            new_xyz[0::2] -= offset
+            new_xyz[1::2] += offset
         new_features_dc = new_features_dc.repeat_interleave(repeats=2, dim=0)
         new_features_rest = new_features_rest.repeat_interleave(repeats=2, dim=0)
         new_opacity = new_opacity.repeat_interleave(repeats=2, dim=0)
@@ -1892,5 +1904,5 @@ class GaussianModel:
         #    self.nodes = torch.cat((self.nodes, new_nodes.to(self.nodes.device)))  
         #    self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, reset_params=False)      
             
-        return num_gs
+        return len(new_xyz)
 #endregion

@@ -237,6 +237,23 @@ class Cameras:
     def __getitem__(self, i): return camera(i)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Pinned memory requires CUDA")
+def test_pinned_cache_reuses_storage_and_upload_preserves_pixels():
+    size = camera_bytes(camera())
+    data = CachedCameras(Cameras(), size * 2, pin_cache=True)
+    first = data[0]
+    assert first.original_image.is_pinned()
+    assert first.original_image.data_ptr() == data[0].original_image.data_ptr()
+    transfer = CameraTransfer()
+    try:
+        uploaded = transfer.ready(transfer.submit(first, False))
+        torch.testing.assert_close(uploaded.original_image.cpu(), first.original_image)
+    finally:
+        transfer.close()
+    data[1]; data[2]
+    assert data.used_bytes <= size * 2 and set(data.cache) == {1, 2}
+
+
 def test_decoded_cache_bounded_and_object_mutations_isolated():
     size = camera_bytes(camera())
     data = CachedCameras(Cameras(), size*2)

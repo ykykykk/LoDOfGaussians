@@ -72,6 +72,8 @@ cd ../..
 ```
 ## Running the method
 
+Windows fork: see the [general training guide](Docs/General_Training.md) for the calibrated Resident v2 entry point and the [detail/transfer validation](Docs/Detail_Optimization_20260922.md) for measured results and limitations.
+
 #### Dataset 
 Prepare your dataset in the standard 3DGS format:
 ```
