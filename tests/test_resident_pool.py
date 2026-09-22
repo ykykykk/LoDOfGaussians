@@ -184,6 +184,34 @@ def test_memory_budget_is_bounded():
     assert capacity_for_budget(100, 59, 24*2**30, 2.5, 4.) == 100
 
 
+def test_shared_cuda_cache_is_not_extra_physical_vram(monkeypatch):
+    from utils.resident_pool import cuda_available_bytes
+    gib = 2**30
+    monkeypatch.setattr(torch.cuda, 'mem_get_info', lambda: (2*gib, 24*gib))
+    monkeypatch.setattr(torch.cuda, 'memory_allocated', lambda: 6*gib)
+    monkeypatch.setattr(torch.cuda, 'memory_reserved', lambda: 36*gib)
+    assert cuda_available_bytes() == 18*gib
+    assert cuda_available_bytes(4*gib) == 22*gib
+    assert cuda_available_bytes(8*gib) == 24*gib
+    monkeypatch.setattr(torch.cuda, 'memory_reserved', lambda: 8*gib)
+    assert cuda_available_bytes() == 4*gib
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason='CUDA required')
+def test_cuda_resize_releases_old_store():
+    host = torch.zeros(131072, 69)
+    pool = ResidentPool(host, torch.zeros(len(host)), 65536, device='cuda')
+    packet = pool.acquire([1, 3])
+    packet.adam_step(torch.ones(2, 23, device='cuda'), torch.ones(23, device='cuda')*.01, 0)
+    pool.flush(); pool.invalidate()
+    del packet
+    before = torch.cuda.memory_reserved()
+    pool.resize_empty(131072)
+    assert torch.cuda.memory_reserved() < before
+    torch.testing.assert_close(pool.acquire([3, 1]).state.cpu(), host[[3, 1]])
+    pool.close()
+
+
 def test_spt_zero_and_terminal_parents_are_disjoint():
     # SPT 0, ordinary leaf, terminal coarse internal node, SPT 1.
     nodes = torch.tensor([[0, -1, 0, 0, 0, 10], [1, 0, 0, -1, 0, 11],

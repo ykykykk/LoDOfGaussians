@@ -74,6 +74,14 @@ class ActivePacket:
         self.dirty = True
 
 
+def cuda_available_bytes(existing_bytes=0):
+    """Reusable allocation budget, bounded by physical rather than shared VRAM."""
+    free, total = torch.cuda.mem_get_info()
+    allocated = torch.cuda.memory_allocated()
+    reusable = max(0, torch.cuda.memory_reserved() - allocated)
+    return min(total, min(free + reusable, max(0, total - allocated)) + existing_bytes)
+
+
 def capacity_for_budget(requested: int, width: int, free_bytes: int,
                         pool_gib: float, headroom_gib: float) -> int:
     """Budget the resident store, not the renderer's unpredictable peak.
@@ -344,6 +352,11 @@ class ResidentPool:
             raise ValueError("capacity cannot be negative")
         self.capacity = min(int(capacity), len(self.host))
         self.state = self.scores = None
+        if self.device.type == 'cuda':
+            # Growing stores cannot reuse smaller old allocations. Return those
+            # blocks at this already-flushed barrier instead of hoarding VRAM.
+            with torch.cuda.device(self.device):
+                torch.cuda.empty_cache()
         self.to_id = np.full(self.capacity, -1, dtype=np.int64)
         self.last_used = np.zeros(self.capacity, dtype=np.int64)
         self.dirty = np.zeros(self.capacity, dtype=np.bool_)

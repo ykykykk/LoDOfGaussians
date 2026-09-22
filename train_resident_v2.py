@@ -14,7 +14,7 @@ import torch
 from utils.incremental_spt import IncrementalSPT
 from utils.camera_geometry import screen_scores, effective_focal
 from utils.general_policy import DetailWindow, relative_spt_volume
-from utils.resident_pool import capacity_for_budget
+from utils.resident_pool import capacity_for_budget, cuda_available_bytes
 from utils.resident_pool_v2 import StreamingResidentPool
 from utils.resident_selection import select_gaussians
 from utils.resident_native import load_native, native_status
@@ -137,9 +137,7 @@ def training(dataset, opt, pipe, saving_iterations, view_graph=None, runtime=Non
     native = load_native(settings.native_ops)
     width = g.properties.shape[1] // 3
     def choose_capacity(existing_bytes=0):
-        free, _ = torch.cuda.mem_get_info()
         allocated = torch.cuda.memory_allocated()
-        reusable = max(0, torch.cuda.memory_reserved() - allocated)
         # Retain space for observed transient render/backward allocations.
         # A new, denser view can still exceed this historical peak.
         transient = max(0, torch.cuda.max_memory_allocated() - allocated)
@@ -147,7 +145,7 @@ def training(dataset, opt, pipe, saving_iterations, view_graph=None, runtime=Non
         requested = min(opt.cache_size, opt.cap_max)
         if settings.adaptive_pool:
             requested = min(requested, g.size + max(65536, g.size // 4))
-        return capacity_for_budget(requested, width, free + reusable + existing_bytes,
+        return capacity_for_budget(requested, width, cuda_available_bytes(existing_bytes),
                                    settings.pool_gib, headroom)
     capacity = choose_capacity()
     pool = StreamingResidentPool(g.properties, g._densification_criterium, capacity,
@@ -205,9 +203,17 @@ def training(dataset, opt, pipe, saving_iterations, view_graph=None, runtime=Non
             ticket.epoch = builder.generation
         return ticket.ids
 
+    physical_vram = torch.cuda.mem_get_info()[1]
     try:
         for iteration in range(first_iteration, opt.iterations+1):
             profile.begin(iteration)
+            with profile.phase('allocator_trim'):
+                # Variable-size views can leave large unused cached blocks after
+                # densification ends too. Release them before WDDM starts paging.
+                reserved = torch.cuda.memory_reserved()
+                if (reserved > physical_vram - settings.headroom_gib * 2**30
+                        and reserved - torch.cuda.memory_allocated() > 2**30):
+                    torch.cuda.empty_cache()
             with profile.phase('data_wait'):
                 if ticket is None:
                     ticket = transfer.submit(views.pop(), speculative=False)
