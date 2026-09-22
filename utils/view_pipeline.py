@@ -59,13 +59,14 @@ class CachedCameras(torch.utils.data.Dataset):
             self.cache[index] = (camera, size)
             return copy(camera)
         self.misses += 1
-        camera = self.dataset[index]
+        compact_loader = getattr(self.dataset, 'get_compact', None)
+        camera = compact_loader(index) if self.compact_images and compact_loader else self.dataset[index]
         if any(isinstance(getattr(camera, n, None), torch.Tensor)
                and getattr(camera, n).device.type != "cpu" for n in TENSORS):
             raise ValueError("camera decoding/cache must stay on CPU")
         if self.compact_images:
             camera = copy(camera)
-            fields = []
+            fields = list(getattr(camera, '_byte_image_fields', ()))
             for name in ('original_image', 'alpha_mask'):
                 tensor = getattr(camera, name, None)
                 if isinstance(tensor, torch.Tensor) and tensor.dtype == torch.float32:

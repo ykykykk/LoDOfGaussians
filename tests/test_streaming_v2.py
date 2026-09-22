@@ -14,6 +14,30 @@ from utils.view_pipeline import CachedCameras, ThreadedViews, CameraTransfer, ca
 from utils.adam_graph import tensor_adam_step, PacketAdamGraph
 
 
+@pytest.mark.parametrize('variant', ['rgb', 'resize', 'rgba', 'mask', 'test_half', 'depth'])
+def test_direct_byte_camera_matches_float_target(variant):
+    from PIL import Image
+    from scene.cameras import Camera
+    from utils.view_pipeline import restore_image_tensor
+    pixels = np.arange(256, dtype=np.uint8).reshape(16, 16)
+    image = Image.fromarray(np.stack([pixels] * (4 if variant == 'rgba' else 3), axis=-1))
+    kwargs = dict(resolution=(8, 8) if variant == 'resize' else (16, 16),
+        colmap_id=0, R=np.eye(3), T=np.zeros(3), FoVx=1., FoVy=1.,
+        depth_params=dict(scale=1., offset=0., med_scale=1.) if variant == 'depth' else None,
+        primx=.5, primy=.5, image=image,
+        alpha_mask=Image.fromarray(pixels) if variant == 'mask' else None,
+        invdepthmap=np.ones((16, 16), dtype=np.float32) if variant == 'depth' else None,
+        image_name='test', uid=0, data_device='cpu',
+        train_test_exp=variant == 'test_half', is_test_view=variant == 'test_half')
+    expected = Camera(**kwargs)
+    actual = CachedCameras([Camera(**kwargs, compact_images=True)], 0, compact_images=True)[0]
+    assert torch.equal(expected.original_image, restore_image_tensor(actual, 'original_image', actual.original_image))
+    if actual.alpha_mask is not None:
+        assert torch.equal(expected.alpha_mask, restore_image_tensor(actual, 'alpha_mask', actual.alpha_mask))
+    if variant == 'depth':
+        assert torch.equal(expected.depth_mask, actual.depth_mask)
+
+
 class TorchOps:
     @staticmethod
     def gather_parameters(state, slots):

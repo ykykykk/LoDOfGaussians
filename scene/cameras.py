@@ -37,7 +37,7 @@ class Camera(nn.Module):
                  image_name, uid,
                  trans=np.array([0.0, 0.0, 0.0]), scale=1.0, data_device = "cuda",
                  train_test_exp=False, is_test_dataset=False, is_test_view=False,
-                 image_path = "empty", focal_length=0.0):
+                 image_path = "empty", focal_length=0.0, compact_images=False):
         super(Camera, self).__init__()
 
         self.uid = uid
@@ -58,13 +58,24 @@ class Camera(nn.Module):
             print(f"[Warning] Custom device {data_device} failed, fallback to default cuda device" )
             self.data_device = torch.device("cuda")
 
-        resized_image_rgb = PILtoTorch(image, resolution)
+        # RGB byte targets need no float expansion on the CPU. Masked inputs
+        # retain the original float path so soft alpha is never quantized.
+        packed_rgb = compact_images and image.mode == 'RGB' and alpha_mask is None and not (train_test_exp and is_test_view)
+        if packed_rgb:
+            if image.size != tuple(resolution):
+                image = image.resize(resolution, Image.LANCZOS)
+            resized_image_rgb = torch.from_numpy(np.array(image)).permute(2, 0, 1)
+            self._byte_image_fields = ('original_image',)
+        else:
+            resized_image_rgb = PILtoTorch(image, resolution)
         gt_image = resized_image_rgb[:3, ...]
         if alpha_mask is not None:
             self.alpha_mask = PILtoTorch(alpha_mask, resolution)
         elif resized_image_rgb.shape[0] == 4:
             self.alpha_mask = resized_image_rgb[3:4, ...].to('cpu')
-        else: 
+        elif packed_rgb:
+            self.alpha_mask = None
+        else:
             self.alpha_mask = torch.ones_like(resized_image_rgb[0:1, ...].to('cpu'))
 
         if train_test_exp and is_test_view:
@@ -73,7 +84,7 @@ class Camera(nn.Module):
             else:
                 self.alpha_mask[..., self.alpha_mask.shape[-1] // 2:] = 0
 
-        self.original_image = gt_image.clamp(0.0, 1.0).to('cpu')
+        self.original_image = gt_image if packed_rgb else gt_image.clamp(0.0, 1.0).to('cpu')
         self.image_width = self.original_image.shape[2]
         self.image_height = self.original_image.shape[1]
         from utils.camera_geometry import camera_intrinsics, intrinsics
@@ -131,6 +142,5 @@ class MiniCam:
         view_inv = torch.inverse(self.world_view_transform)
         self.camera_center = view_inv[3][:3]
         self.full_proj_transform_inverse = torch.inverse(self.full_proj_transform)
-
 
 

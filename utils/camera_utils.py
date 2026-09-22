@@ -21,7 +21,7 @@ import cv2
 
 WARNED = False
 
-def loadCam(args, id, cam_info, resolution_scale, is_test_dataset):
+def loadCam(args, id, cam_info, resolution_scale, is_test_dataset, compact_images=False):
     from scene.cameras import Camera
     image = Image.open(cam_info.image_path)
 
@@ -70,7 +70,7 @@ def loadCam(args, id, cam_info, resolution_scale, is_test_dataset):
                   FoVx=cam_info.FovX, FoVy=cam_info.FovY, depth_params=cam_info.depth_params,
                   primx=cam_info.primx, primy=cam_info.primy,
                   image=image, alpha_mask=alpha_mask, invdepthmap=invdepthmap, image_path=cam_info.image_path,
-                  image_name=cam_info.image_name, uid=id, data_device=args.data_device, 
+                  image_name=cam_info.image_name, uid=id, data_device=args.data_device, compact_images=compact_images,
                   train_test_exp=args.train_test_exp, is_test_dataset=is_test_dataset, is_test_view=cam_info.is_test, focal_length=cam_info.focal_length)
 
 def cameraList_from_camInfos(cam_infos, resolution_scale, args):
@@ -125,4 +125,7 @@ class CameraDataset(torch.utils.data.Dataset):
         X = loadCam(self.args, index, info, self.resolution_scales, self.is_test)
 
         return X
-  
+
+  def get_compact(self, index):
+        return loadCam(self.args, index, self.list_cam_infos[index],
+                       self.resolution_scales, self.is_test, compact_images=True)
