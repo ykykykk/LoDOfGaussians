@@ -269,6 +269,42 @@ def test_decoded_cache_bounded_and_object_mutations_isolated():
     assert not tiny.cache
 
 
+@pytest.mark.parametrize('device', ['cpu', 'cuda'])
+def test_byte_image_cache_roundtrip_is_exact_and_keeps_soft_mask_precision(device):
+    if device == 'cuda' and not torch.cuda.is_available():
+        pytest.skip('CUDA required')
+    source = camera()
+    source.original_image = (torch.arange(256).float() / 255.).reshape(1, 16, 16).expand(3, -1, -1)
+    source.alpha_mask = torch.full((1, 16, 16), .12345)
+    original = source.original_image.clone()
+    cache = CachedCameras([source], 8192, pin_cache=device == 'cuda', compact_images=True)
+    packed = cache[0]
+    assert packed.original_image.dtype == torch.uint8
+    assert packed.alpha_mask.dtype == torch.float32
+    assert source.original_image.dtype == torch.float32
+    assert cache.used_bytes <= cache.max_bytes
+    transfer = CameraTransfer(device=device)
+    try:
+        result = transfer.ready(transfer.submit(packed, False))
+        torch.testing.assert_close(result.original_image.cpu(), original, rtol=0, atol=0)
+        torch.testing.assert_close(result.alpha_mask.cpu(), source.alpha_mask, rtol=0, atol=0)
+        assert result._byte_image_fields == ()
+        # The coarse loss uses the same restoration without CameraTransfer.
+        from utils.view_pipeline import restore_image_tensor
+        torch.testing.assert_close(restore_image_tensor(packed, 'original_image',
+            packed.original_image.to(device)).cpu(), original, rtol=0, atol=0)
+    finally:
+        transfer.close()
+
+
+def test_byte_cache_preserves_premultiplied_soft_alpha_targets():
+    source = camera()
+    source.original_image = torch.tensor([.12345, .33333, .918273]).reshape(3, 1, 1)
+    packed = CachedCameras([source], 8192, compact_images=True)[0]
+    assert packed.original_image.dtype == torch.float32
+    torch.testing.assert_close(packed.original_image, source.original_image, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize('threaded', [False, True])
 def test_cpu_view_lookahead_order_and_exhaustion(threaded):
     views = ThreadedViews([[camera(i)] for i in range(3)], count=8, enabled=threaded)

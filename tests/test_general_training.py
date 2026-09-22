@@ -87,6 +87,18 @@ def test_explicit_budgets():
     assert p['iterations']==1234 and p['coarse_iterations']==17
     assert p['position_lr_max_steps']==1234
 
+
+def test_full_resolution_byte_cache_fits_without_changing_quality_settings():
+    c=json.loads((ROOT/'configs/general_balanced.json').read_text())
+    dataset=dict(training_views=42,decoded_training_bytes=16*2**30,compact_training_bytes=4*2**30)
+    plan=resolve_plan(c,dataset,32*2**30)
+    assert plan['data_workers']==0 and plan['coarse_compact_images']
+    assert plan['resolved_policy']['cached_training_bytes']==4*2**30
+    assert plan['densify_grad_threshold']==c['densify_grad_threshold']
+    c['resident']['compact_images']=False
+    reference=resolve_plan(c,dataset,32*2**30)
+    assert reference['data_workers']==4 and not reference['coarse_compact_images']
+
 def test_resident_resize_barrier_preserves_values():
     host=torch.zeros(12,69);scores=torch.zeros(12)
     pool=ResidentPool(host,scores,4,device='cpu')
@@ -112,6 +124,9 @@ def test_preflight_fingerprints_and_size_validation(tmp_path):
     images,sparse=fixture_dataset(tmp_path)
     a=inspect_dataset(tmp_path,resolution=2,hold=3)
     assert a['training_views']==2 and a['training_sizes']==[(6,4)]
+    assert a['compact_training_bytes']==2*(6*4*4+1024)
+    empty_masks=tmp_path/'masks';empty_masks.mkdir()
+    assert inspect_dataset(tmp_path,masks_dir=empty_masks,resolution=2,hold=3)['compact_training_bytes']==a['compact_training_bytes']
     b=inspect_dataset(tmp_path,resolution=1,hold=3)
     assert b['input_fingerprint']!=a['input_fingerprint']
     Image.new('RGB',(12,12)).save(images/'0.png')

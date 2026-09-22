@@ -15,6 +15,16 @@ TENSORS = ("K_train", "original_image", "alpha_mask", "invdepthmap", "depth_mask
 METADATA = ("world_view_transform", "projection_matrix", "full_proj_transform", "camera_center")
 
 
+def restore_image_tensor(camera, name, tensor):
+    """Restore only fields proved to round-trip exactly through byte / 255."""
+    if name in getattr(camera, '_byte_image_fields', ()):
+        # A device tensor divisor avoids CUDA's scalar reciprocal multiply,
+        # which differs from the CPU targets by one float32 ULP.
+        divisor = torch.tensor(255., device=tensor.device)
+        return tensor.float().div_(divisor)
+    return tensor
+
+
 def camera_bytes(camera):
     seen, size = set(), 0
     for name in TENSORS:
@@ -30,10 +40,11 @@ def camera_bytes(camera):
 
 class CachedCameras(torch.utils.data.Dataset):
     """Per-worker LRU, with the total configured budget divided by workers."""
-    def __init__(self, dataset, max_bytes, pin_cache=False):
+    def __init__(self, dataset, max_bytes, pin_cache=False, compact_images=False):
         self.dataset = dataset
         self.max_bytes = max(0, int(max_bytes))
         self.pin_cache = pin_cache
+        self.compact_images = compact_images
         self.cache = OrderedDict()
         self.used_bytes = 0
         self.hits = self.misses = 0
@@ -52,6 +63,18 @@ class CachedCameras(torch.utils.data.Dataset):
         if any(isinstance(getattr(camera, n, None), torch.Tensor)
                and getattr(camera, n).device.type != "cpu" for n in TENSORS):
             raise ValueError("camera decoding/cache must stay on CPU")
+        if self.compact_images:
+            camera = copy(camera)
+            fields = []
+            for name in ('original_image', 'alpha_mask'):
+                tensor = getattr(camera, name, None)
+                if isinstance(tensor, torch.Tensor) and tensor.dtype == torch.float32:
+                    packed = (tensor * 255.).round().to(torch.uint8)
+                    # Soft masks and higher-precision inputs must not be quantized.
+                    if torch.equal(packed.float().div_(255.), tensor):
+                        setattr(camera, name, packed)
+                        fields.append(name)
+            camera._byte_image_fields = tuple(fields)
         size = camera_bytes(camera)
         if 0 < size <= self.max_bytes:
             while self.cache and self.used_bytes + size > self.max_bytes:
@@ -148,6 +171,9 @@ class CameraTransfer:
         result = copy(ticket.cpu)
         sources = []
         if self.stream is None:
+            for name in getattr(result, '_byte_image_fields', ()):
+                setattr(result, name, restore_image_tensor(result, name, getattr(result, name)))
+            result._byte_image_fields = ()
             ticket.camera = result
             return
         self.pending = [(e, s) for e, s in self.pending if not e.query()]
@@ -162,7 +188,9 @@ class CameraTransfer:
         self.stream.wait_stream(torch.cuda.current_stream(self.device))
         with torch.cuda.stream(self.stream):
             for name, tensor in sources:
-                setattr(result, name, tensor.to(self.device, non_blocking=True))
+                uploaded = tensor.to(self.device, non_blocking=True)
+                setattr(result, name, restore_image_tensor(ticket.cpu, name, uploaded))
+            result._byte_image_fields = ()
             ticket.event = torch.cuda.Event()
             ticket.event.record(self.stream)
         self.pending.append((ticket.event, sources))
@@ -239,14 +267,15 @@ class ViewSchedule(torch.utils.data.Sampler):
                 remaining -= take
 
 
-def make_view_loader(cameras, opt, cache_bytes, seed, view_graph=None):
+def make_view_loader(cameras, opt, cache_bytes, seed, view_graph=None, compact_images=False):
     from utils.training_runtime import direct_collate
     workers = int(getattr(opt, 'data_workers', 4))
     factor = int(getattr(opt, 'data_prefetch_factor', 1))
     if workers < 0 or factor < 1:
         raise ValueError("invalid DataLoader worker/prefetch configuration")
     dataset = CachedCameras(cameras, max(0, int(cache_bytes)) // max(1, workers),
-                           pin_cache=workers == 0 and torch.cuda.is_available())
+                           pin_cache=workers == 0 and torch.cuda.is_available(),
+                           compact_images=compact_images)
     kwargs = dict(batch_size=1, num_workers=workers, collate_fn=direct_collate,
                   sampler=ViewSchedule(len(cameras), opt.iterations+1, seed, view_graph),
                   pin_memory=bool(getattr(opt, 'pin_memory', True)),

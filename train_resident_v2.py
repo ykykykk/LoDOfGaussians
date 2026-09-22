@@ -36,6 +36,7 @@ class ResidentOptions:
     gaussian_prefetch_rows: int = 131072
     image_prefetch_mib: int = 512
     image_cache_gib: float = 1.0
+    compact_images: bool = True
     native_ops: str = "auto"
     graph_adam: bool = True
     graph_min_reuse: int = 8
@@ -143,7 +144,8 @@ def training(dataset, opt, pipe, saving_iterations, view_graph=None, runtime=Non
     profile = TrainingProfile(output / 'resident_profile.jsonl', settings.profile_every)
     seed = torch.initial_seed()
     loader = make_view_loader(cameras, opt, settings.image_cache_gib * 2**30, seed,
-                              view_graph if opt.graph_view_select else None)
+                              view_graph if opt.graph_view_select else None,
+                              compact_images=settings.compact_images)
     views = ThreadedViews(loader, opt.iterations + 1, enabled=settings.view_prefetch)
     transfer = CameraTransfer(prefetch_bytes=settings.image_prefetch_mib * 2**20)
     adam_graph = PacketAdamGraph(settings.graph_min_reuse)

@@ -11,6 +11,7 @@
 import math
 from fused_ssim import fused_ssim
 from utils.training_runtime import make_camera_loader, shutdown_camera_loader
+from utils.view_pipeline import restore_image_tensor
 import os
 import torch
 from utils.loss_utils import l1_loss, ssim
@@ -115,12 +116,14 @@ def training(dataset, opt, pipe, saving_iterations, checkpoint_iterations, check
                 image = render_pkg["render"]
                 
                 # Loss
-                gt_image = viewpoint_cam.original_image.cuda(non_blocking=True).float()
+                gt_image = restore_image_tensor(viewpoint_cam, 'original_image',
+                    viewpoint_cam.original_image.cuda(non_blocking=True)).float()
                 #torchvision.utils.save_image(image, os.path.join(scene.model_path, str(iteration) + ".png"))
                 #torchvision.utils.save_image(gt_image, os.path.join(scene.model_path, "gt_" + str(iteration) + ".png"))
                 loss_image = image
                 if viewpoint_cam.alpha_mask is not None:
-                    loss_image = image * viewpoint_cam.alpha_mask.cuda(non_blocking=True).float()
+                    loss_image = image * restore_image_tensor(viewpoint_cam, 'alpha_mask',
+                        viewpoint_cam.alpha_mask.cuda(non_blocking=True)).float()
                 Ll1 = l1_loss(loss_image, gt_image)
                 if getattr(opt, "coarse_fused_ssim", True):
                     ssim_value = fused_ssim(loss_image.unsqueeze(0), gt_image.unsqueeze(0))

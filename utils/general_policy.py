@@ -33,16 +33,20 @@ def resolve_plan(config, dataset, available_ram):
     # Full CPU caching on small datasets avoids Windows IPC of whole float images.
     limit = min(int(policy.get('image_cache_max_gib', 8) * 2**30), int(available_ram * .25))
     decoded = int(dataset['decoded_training_bytes'])
-    full_cache = 0 < decoded <= limit and policy.get('auto_image_io', True)
+    compact_images = runtime.get('compact_images', True)
+    cached = int(dataset.get('compact_training_bytes', decoded)) if compact_images else decoded
+    out['coarse_compact_images'] = compact_images
+    full_cache = 0 < cached <= limit and policy.get('auto_image_io', True)
     if full_cache:
         out['data_workers'] = 0
         out['pin_memory'] = False  # DMA staging is owned by CameraTransfer.
-        runtime['image_cache_gib'] = min(limit, decoded * 1.05 + 2**20) / 2**30
+        runtime['image_cache_gib'] = min(limit, cached * 1.05 + 2**20) / 2**30
     else:
         out['data_workers'] = max(0, requested)
         runtime['image_cache_gib'] = min(limit, 2 * 2**30) / 2**30
     out['resolved_policy'] = dict(training_views=n, estimated_epochs=steps/n,
         decoded_training_bytes=decoded, image_io='shared_cpu_cache' if full_cache else 'worker_lru',
+        cached_training_bytes=cached, compact_images=compact_images,
         cache_budget_bytes=int(runtime['image_cache_gib'] * 2**30),
         note='Budgets are bounded heuristics, not a convergence or quality guarantee')
     return out

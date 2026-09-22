@@ -63,6 +63,7 @@
         "gaussian_prefetch_rows": 131072,
         "image_prefetch_mib": 512,
         "image_cache_gib": 1.0,
+        "compact_images": true,
         "native_ops": "auto",
         "graph_adam": true,
         "graph_min_reuse": 8,

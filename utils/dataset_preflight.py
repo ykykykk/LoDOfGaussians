@@ -31,7 +31,7 @@ def inspect_dataset(root, images_dir=None, masks_dir=None, resolution=2, hold=10
         if np.any(params[:focal_count] <= 0):
             raise ValueError('Focal length must be positive')
     ordered = sorted(images.values(), key=lambda x:x.name)
-    records, decoded, masks, sizes = [], 0, 0, []
+    records, decoded, compact, masks, sizes = [], 0, 0, 0, []
     for i, image in enumerate(ordered):
         if image.camera_id not in cameras or not np.isfinite(image.tvec).all() or not np.isfinite(image.qvec).all():
             raise ValueError('Invalid image extrinsics or camera reference')
@@ -46,6 +46,7 @@ def inspect_dataset(root, images_dir=None, masks_dir=None, resolution=2, hold=10
             raise FileNotFoundError(path)
         with Image.open(path) as source:
             w, h = source.size
+            byte_rgb = source.mode == 'RGB'
         if abs(w/h - camera.width/camera.height) > 1e-3 * camera.width/camera.height:
             raise ValueError(f'Image/calibration aspect ratio mismatch: {image.name}')
         tw, th = image_size(w, h, resolution)
@@ -55,6 +56,7 @@ def inspect_dataset(root, images_dir=None, masks_dir=None, resolution=2, hold=10
         sizes.append((tw, th))
         stat = path.stat()
         record = [str(path), stat.st_size, stat.st_mtime_ns, w, h]
+        mask = None
         if masks_dir:
             mask = next((masks_dir/Path(image.name).with_suffix(suffix) for suffix in ('.png','.JPG')
                          if (masks_dir/Path(image.name).with_suffix(suffix)).is_file()), None)
@@ -63,6 +65,9 @@ def inspect_dataset(root, images_dir=None, masks_dir=None, resolution=2, hold=10
                     if source.size != (w,h):
                         raise ValueError(f'Mask/image size mismatch: {mask}')
                 stat = mask.stat(); record += [str(mask),stat.st_size,stat.st_mtime_ns]; masks += 1
+        if not test:
+            # Conservative for alpha, actual external masks and non-RGB formats.
+            compact += tw * th * (4 if byte_rgb and mask is None else 16) + 1024
         records.append(record)
     training_views = sum(not (hold > 0 and i % hold == 0) for i in range(len(ordered)))
     if not training_views:
@@ -81,6 +86,7 @@ def inspect_dataset(root, images_dir=None, masks_dir=None, resolution=2, hold=10
         training_views=training_views, test_views=len(ordered)-training_views,
         cameras=len(cameras), masks=masks, resolution=resolution,
         training_sizes=sorted(set(sizes)), decoded_training_bytes=decoded,
+        compact_training_bytes=compact,
         model_format=ext, model_path=str(sparse), images_path=str(images_dir),
         caveat='Image metadata and calibration fingerprint; does not prove pose accuracy or detect same-aspect crops')
 

@@ -36,7 +36,9 @@ def make_camera_loader(cameras, opt, *, shuffle: bool):
     cache_gib = float(getattr(opt, "coarse_image_cache_gib", 0.0))
     if cache_gib > 0:
         from utils.view_pipeline import CachedCameras
-        cameras = CachedCameras(cameras, int(cache_gib * 2**30) // max(1, workers))
+        cameras = CachedCameras(cameras, int(cache_gib * 2**30) // max(1, workers),
+                                pin_cache=workers == 0 and torch.cuda.is_available(),
+                                compact_images=getattr(opt, 'coarse_compact_images', False))
     kwargs = dict(
         batch_size=1, num_workers=workers, shuffle=shuffle,
         collate_fn=direct_collate,

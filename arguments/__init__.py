@@ -166,6 +166,7 @@ class OptimizationParams(ParamGroup):
         self.pin_memory = True
         self.coarse_fused_ssim = True
         self.coarse_image_cache_gib = 0.0
+        self.coarse_compact_images = False
         self.SH_degree = 1
         self.SH_increase_after_train_percent = 0.1
         self.lr_multiplier = 1.0
