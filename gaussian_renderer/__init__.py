@@ -55,17 +55,8 @@ def render_gsplat(viewpoint_camera,
     W = int(viewpoint_camera.image_width)
     H = int(viewpoint_camera.image_height)
 
-    # Extract focal lengths from FoV
-    fx = W / (2.0 * math.tan(viewpoint_camera.FoVx * 0.5))
-    fy = H / (2.0 * math.tan(viewpoint_camera.FoVy * 0.5))
-    cx, cy = W / 2.0, H / 2.0
-
-    # Intrinsics Matrix (K) -> Shape: (1, 3, 3)
-    K = torch.tensor([
-        [fx, 0., cx],
-        [0., fy, cy],
-        [0., 0.,  1.]
-    ], dtype=torch.float32, device="cuda").unsqueeze(0)
+    from utils.camera_geometry import camera_intrinsics
+    K = camera_intrinsics(viewpoint_camera, means3D.device).unsqueeze(0)
 
     # Extrinsics Matrix (viewmat) -> Shape: (1, 4, 4)
     # INRIA stores W2C transposed (so p_view = p_world @ W2C_inria). 

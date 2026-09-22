@@ -165,6 +165,7 @@ class OptimizationParams(ParamGroup):
         self.data_prefetch_factor = 1
         self.pin_memory = True
         self.coarse_fused_ssim = True
+        self.coarse_image_cache_gib = 0.0
         self.SH_degree = 1
         self.SH_increase_after_train_percent = 0.1
         self.lr_multiplier = 1.0
@@ -188,6 +189,12 @@ class OptimizationParams(ParamGroup):
         self.densify_from_iter = 100
         self.densify_until_iter = self.iterations - 10000
         self.densify_grad_threshold = 0.0015
+        self.densify_score_space = "pixel"
+        self.densify_max_leaf_fraction = 0.0
+        self.densify_max_new_nodes = 0
+        self.SPT_relative_volume = 0.0
+        self.lod_pixel_consistent = False
+        self.detail_diagnostics = False
         self.depth_l1_weight_init = 1.0
         self.depth_l1_weight_final = 0.01
         self.llff_hold = -1

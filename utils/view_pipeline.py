@@ -9,7 +9,7 @@ from copy import copy
 from dataclasses import dataclass
 import torch
 
-TENSORS = ("original_image", "alpha_mask", "invdepthmap", "depth_mask",
+TENSORS = ("K_train", "original_image", "alpha_mask", "invdepthmap", "depth_mask",
            "world_view_transform", "projection_matrix", "full_proj_transform",
            "full_proj_transform_inverse", "camera_center")
 METADATA = ("world_view_transform", "projection_matrix", "full_proj_transform", "camera_center")

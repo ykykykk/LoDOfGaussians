@@ -5,12 +5,9 @@ import time
 import platform
 import torch
 from pathlib import Path
-from scene import Scene, GaussianModel
 from arguments import ModelParams, PipelineParams, OptimizationParams
-import train_hierarchy
 from utils import view_graph_utils
 import networkx as nx
-import train_scaffold
 import json
 
 if __name__ == '__main__':
@@ -24,7 +21,10 @@ if __name__ == '__main__':
     parser.add_argument('--images_dir', default="")
     parser.add_argument('--masks_dir', default="")
     parser.add_argument('--depths_dir', default="")
-    parser.add_argument('--config', default="")
+    parser.add_argument('--config', default='general_balanced.json')
+    parser.add_argument('--plan_only', action='store_true')
+    parser.add_argument('--iterations', type=int, default=None)
+    parser.add_argument('--coarse_iterations', type=int, default=None)
     parser.add_argument('--output_dir', default="")
     parser.add_argument('--skip_if_exists', action="store_true", default=False, help="Skip coarse training if a scaffold already exists. This is determined by checking if there are any iterations in the scaffold point cloud directory.")
     parser.add_argument('--export_ply', default="", help="Write only the finest leaf Gaussians to this PLY path (no ancestor LoDs).")
@@ -57,10 +57,41 @@ if __name__ == '__main__':
     model_params.images = images_dir
     start_time = time.time()
     model_params.model_path = os.path.join(output_dir, "scaffold")
-    with open(f"configs/{args.config}", "r") as f:
+    config_path = Path(args.config)
+    if not config_path.is_file():
+        config_path = Path(__file__).resolve().parent / "configs" / args.config
+    with config_path.open(encoding="utf-8-sig") as f:
         data = json.load(f)
 
-    optimization_params = OptimizationParams(parser)
+    for key in ('iterations', 'coarse_iterations'):
+        if getattr(args, key) is not None:
+            data[key] = getattr(args, key)
+    general = bool((data.get('general_policy') or {}).get('enabled', False))
+    inspection = None
+    if general or args.plan_only:
+        import psutil
+        from utils.dataset_preflight import inspect_dataset
+        from utils.general_policy import resolve_plan
+        if Path(colmap_dir).resolve() != (Path(args.project_dir)/'sparse').resolve():
+            raise ValueError('General mode uses project/sparse/0; use a matching project directory')
+        inspection = inspect_dataset(args.project_dir, images_dir, masks_dir, args.resolution, int(data.get('llff_hold',100)))
+        data = resolve_plan(data, inspection, psutil.virtual_memory().available)
+        if general:
+            model_params.alpha_masks = masks_dir or ''
+            model_params.depths = depths_dir or ''
+            if model_params.depths:
+                raise ValueError('General RGB mode does not support depth supervision')
+            data['coarse_image_cache_gib'] = data['resident']['image_cache_gib']
+        Path(output_dir).mkdir(parents=True,exist_ok=True)
+        (Path(output_dir)/'dataset_plan.json').write_text(json.dumps(inspection,indent=2),encoding='utf-8')
+        (Path(output_dir)/'resolved_config.json').write_text(json.dumps(data,indent=2),encoding='utf-8')
+        print('Resolved dataset policy:', json.dumps(data.get('resolved_policy', {})))
+        if args.plan_only:
+            print('Plan written:', output_dir)
+            sys.exit(0)
+    import train_hierarchy
+    import train_scaffold
+    optimization_params = OptimizationParams(argparse.ArgumentParser(add_help=False))
     config = argparse.Namespace(**data)
     optimization_params = optimization_params.extract(config)
     training_backend = args.training_backend or data.get("training_backend", "legacy")
@@ -88,6 +119,18 @@ if __name__ == '__main__':
         print(f"Resident runtime version: {version}")
     print(f"Fine training backend: {training_backend}")
 
+    if general and (training_backend != 'resident' or version != 2):
+        raise ValueError('General policy requires resident v2')
+    manifest = None
+    manifest_path = Path(output_dir)/'scaffold'/'dataset_manifest.json'
+    if general:
+        from utils.dataset_preflight import scaffold_manifest
+        manifest = scaffold_manifest(inspection, optimization_params, model_params, args.seed)
+        existing = Path(output_dir)/'scaffold'/'point_cloud'
+        if args.skip_if_exists and existing.is_dir() and any(existing.iterdir()):
+            if not manifest_path.is_file() or json.loads(manifest_path.read_text(encoding='utf-8')) != manifest:
+                raise ValueError('Scaffold calibration/configuration fingerprint missing or different. Use a new output directory.')
+
     # Choose the scaffold that has been trained the longest.
     if args.skip_if_exists and os.path.exists(os.path.join(output_dir, "scaffold/point_cloud/")) and len(os.listdir(os.path.join(output_dir, "scaffold/point_cloud/"))) > 0:
         possible_scaffolds = os.listdir(os.path.join(output_dir, "scaffold/point_cloud/"))
@@ -104,6 +147,9 @@ if __name__ == '__main__':
             print(f"Error executing train_coarse: {e}")
             sys.exit(1)
         chosen_iteration = optimization_params.coarse_iterations
+        if manifest is not None:
+            manifest_path.parent.mkdir(parents=True,exist_ok=True)
+            manifest_path.write_text(json.dumps(manifest,indent=2),encoding="utf-8")
 
     if optimization_params.graph_view_select:
         graph_path = os.path.join(colmap_dir, "0/consistency_graph.edge_list")

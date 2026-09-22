@@ -91,7 +91,7 @@ def training(dataset, opt, pipe, saving_iterations, checkpoint_iterations, check
                 iter_start.record()
 
                 # Every 1000 its we increase the levels of SH up to a maximum degree
-                if iteration % int(math.floor(opt.coarse_iterations * opt.SH_increase_after_train_percent)) == 0:
+                if iteration % max(1, int(math.floor(opt.coarse_iterations * opt.SH_increase_after_train_percent))) == 0:
                     gaussians.oneupSHdegree()
 
                 # Render

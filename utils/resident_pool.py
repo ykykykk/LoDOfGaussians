@@ -323,6 +323,19 @@ class ResidentPool:
         if self.active is not None:
             self.active.scores.zero_()
 
+    def resize_empty(self, capacity):
+        """Resize only at a flushed topology barrier; never migrate dirty slots."""
+        if self.used or self.active is not None or self.dirty.any():
+            raise RuntimeError("flush and invalidate before resizing the resident pool")
+        if capacity < 0:
+            raise ValueError("capacity cannot be negative")
+        self.capacity = min(int(capacity), len(self.host))
+        self.state = self.scores = None
+        self.to_id = np.full(self.capacity, -1, dtype=np.int64)
+        self.last_used = np.zeros(self.capacity, dtype=np.int64)
+        self.dirty = np.zeros(self.capacity, dtype=np.bool_)
+        self._eviction_cursor = 0
+
     def close(self):
         self.flush()
         self.invalidate()

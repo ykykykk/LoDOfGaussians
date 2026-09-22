@@ -1803,7 +1803,8 @@ class GaussianModel:
         for name in ["xyz", "f_dc", "scaling", "rotation", "opacity", "f_rest", "nodes"]:
             self.properties[sibling_indices, number_properties:] = 0
             
-    def add_new_gs(self, cap_max, size, densification, densify_percent = 1.05, densify_threshold = 0.01):
+    def add_new_gs(self, cap_max, size, densification, densify_percent = 1.05, densify_threshold = 0.01,
+                   max_leaf_fraction=0.0, max_new_nodes=0):
         device = self.properties.device
         target_num = min(cap_max, int(densify_percent * size))
         num_gs = max(0, target_num - size)
@@ -1820,6 +1821,10 @@ class GaussianModel:
             #add_idx = alive_indices[torch.where(self._densification_criterium[alive_indices] > 0.001)]
             #ratio = torch.zeros((self.size, 1), device='cpu', dtype=torch.int32)
             add_idx = alive_indices[self._densification_criterium[alive_indices] > densify_threshold]
+            if max_leaf_fraction or max_new_nodes:
+                from utils.general_policy import eligible_parents
+                add_idx = eligible_parents(self._densification_criterium, alive_indices, densify_threshold,
+                    max(0, cap_max - self.size), max_leaf_fraction, max_new_nodes)
             if (len(add_idx) * 2) + self.size > cap_max:
                 to_add = max(cap_max - self.size, 0) // 2
                 add_idx = add_idx[: to_add]

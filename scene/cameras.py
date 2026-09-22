@@ -48,7 +48,9 @@ class Camera(nn.Module):
         self.FoVy = FoVy
         self.image_name = image_name
         self.image_path = image_path
-        self.focal_length = focal_length
+        self.focal_length = focal_length  # Original-image metadata for legacy policies.
+        self.primx, self.primy = float(primx), float(primy)
+        self.resolution = resolution
         try:
             self.data_device = torch.device(data_device)
         except Exception as e:
@@ -74,6 +76,11 @@ class Camera(nn.Module):
         self.original_image = gt_image.clamp(0.0, 1.0).to('cpu')
         self.image_width = self.original_image.shape[2]
         self.image_height = self.original_image.shape[1]
+        from utils.camera_geometry import camera_intrinsics, intrinsics
+        self.K_train = camera_intrinsics(self)
+        self.fx, self.fy, self.cx, self.cy = intrinsics(self.image_width, self.image_height,
+            self.FoVx, self.FoVy, self.primx, self.primy)
+        self.lod_focal_length = max(self.fx, self.fy)
 
         if self.alpha_mask is not None:
             self.original_image *= self.alpha_mask

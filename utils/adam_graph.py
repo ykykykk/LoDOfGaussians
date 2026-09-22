@@ -60,9 +60,10 @@ class PacketAdamGraph:
             self.graph = graph
             # Hold the owning state tensor; a stale allocator address is not a
             # valid cache key once the previous packet has been destroyed.
-            self.inputs = (gradient, rate_input, corrections, packet.state)
+            self.inputs = (gradient, rate_input, corrections, packet.state, frozen)
+            # The captured frozen mask is an external tensor; retain it across replays.
             self.captures += 1
-        gradient, rate_input, corrections, _ = self.inputs
+        gradient, rate_input, corrections, _, _frozen = self.inputs
         gradient.copy_(grad)
         rate_input.copy_(rates)
         corrections.copy_(torch.tensor([1 - 0.9**(iteration + 1), math.sqrt(1 - 0.999**(iteration + 1))],

@@ -12,6 +12,8 @@ import time
 
 import torch
 from utils.incremental_spt import IncrementalSPT
+from utils.camera_geometry import screen_scores, effective_focal
+from utils.general_policy import DetailWindow, relative_spt_volume
 from utils.resident_pool import capacity_for_budget
 from utils.resident_pool_v2 import StreamingResidentPool
 from utils.resident_selection import select_gaussians
@@ -37,6 +39,7 @@ class ResidentOptions:
     native_ops: str = "auto"
     graph_adam: bool = True
     graph_min_reuse: int = 8
+    adaptive_pool: bool = False
 
     def __post_init__(self):
         if (self.pool_gib <= 0 or self.headroom_gib < 0 or self.transfer_rows <= 0
@@ -53,6 +56,14 @@ def validate_options(opt, runtime=None):
         raise ValueError("resident v2 requires classic densification and CPU backing")
     if opt.prune_unused or opt.dampen_scale_grad or opt.optimize_exposure or opt.use_occlusion_culling:
         raise ValueError("use legacy for experimental pruning, scale damping, exposure or occlusion")
+    if getattr(opt, "densify_score_space", "pixel") not in ("pixel", "ndc"):
+        raise ValueError("densify_score_space must be pixel or ndc")
+    if opt.densify_grad_threshold <= 0 or not math.isfinite(opt.densify_grad_threshold):
+        raise ValueError("detail threshold must be positive and finite")
+    if not 0 <= getattr(opt, "densify_max_leaf_fraction", 0.) <= 1:
+        raise ValueError("invalid per-window leaf fraction")
+    if getattr(opt, "densify_max_new_nodes", 0) < 0:
+        raise ValueError("invalid new-node budget")
     return settings
 
 
@@ -79,7 +90,12 @@ def _backward(packet, camera, g, opt, pipe, background, profile):
         screen = pkg['viewspace_points'].grad
         if screen is None:
             raise RuntimeError('gsplat must retain means2d gradients for detail-driven splits')
-        packet.accumulate_scores(pkg['packed_indices'], screen.norm(dim=-1))
+        score = screen_scores(screen, camera.original_image.shape[-1], camera.original_image.shape[-2],
+                              getattr(opt, 'densify_score_space', 'pixel'))
+        packet.accumulate_scores(pkg['packed_indices'], score)
+        tracker = getattr(g, '_detail_tracker', None)
+        if tracker is not None:
+            tracker.observe(packet, pkg['packed_indices'])
     return loss.detach(), raw.grad
 
 
@@ -99,18 +115,26 @@ def training(dataset, opt, pipe, saving_iterations, view_graph=None, runtime=Non
     cameras = scene.getTrainCameras()
     if not len(cameras):
         raise ValueError('no training cameras')
-    base_focal = cameras[0].focal_length
+    first = cameras[0]
+    pixel_lod = getattr(opt, 'lod_pixel_consistent', False)
+    base_focal = effective_focal(first) if pixel_lod else first.focal_length
+    root_volume = relative_spt_volume(opt, g.spatial_lr_scale)
     if base_focal <= 0:
         raise ValueError('camera focal length must be positive')
-    builder = IncrementalSPT(opt.SPT_root_volume, opt.target_granularity_pixels / base_focal,
+    builder = IncrementalSPT(root_volume, opt.target_granularity_pixels / base_focal,
                              opt.min_SPT_size, opt.use_bounding_spheres)
     builder.refresh(g)
     native = load_native(settings.native_ops)
     width = g.properties.shape[1] // 3
-    free, _ = torch.cuda.mem_get_info()
-    reusable = max(0, torch.cuda.memory_reserved() - torch.cuda.memory_allocated())
-    capacity = capacity_for_budget(min(opt.cache_size, opt.cap_max), width, free + reusable,
+    def choose_capacity(existing_bytes=0):
+        free, _ = torch.cuda.mem_get_info()
+        reusable = max(0, torch.cuda.memory_reserved() - torch.cuda.memory_allocated())
+        requested = min(opt.cache_size, opt.cap_max)
+        if settings.adaptive_pool:
+            requested = min(requested, g.size + max(65536, g.size // 4))
+        return capacity_for_budget(requested, width, free + reusable + existing_bytes,
                                    settings.pool_gib, settings.headroom_gib)
+    capacity = choose_capacity()
     pool = StreamingResidentPool(g.properties, g._densification_criterium, capacity,
                                  transfer_rows=settings.transfer_rows, pin_staging=settings.pin_staging,
                                  ops=native, prefetch_rows=settings.gaussian_prefetch_rows)
@@ -134,15 +158,21 @@ def training(dataset, opt, pipe, saving_iterations, view_graph=None, runtime=Non
         version=2, runtime=asdict(settings), native=native_status(), pool_capacity=capacity,
         property_width=width, torch=torch.__version__, cuda=torch.version.cuda,
         gpu=torch.cuda.get_device_name(), platform=platform.platform(), resolution=dataset.resolution,
-        iterations=opt.iterations, seed=seed, optimization=vars(opt)), indent=2), encoding='utf-8')
+        iterations=opt.iterations, seed=seed, optimization=vars(opt),
+        scene_radius=g.spatial_lr_scale, spt_root_volume=root_volume, lod_base_focal=base_focal), indent=2), encoding='utf-8')
     print(f'Resident v2: {capacity:,} slots; native={native is not None}; incremental_spt={settings.incremental_spt}')
     progress = tqdm(total=opt.iterations+1, desc='Resident v2 fine training')
     ticket = None
+    tracker = DetailWindow(opt.cap_max, pool.device) if getattr(opt, 'detail_diagnostics', False) else None
+    g._detail_tracker = tracker
+    detail_file = (output / 'densification.jsonl').open('w', encoding='utf-8')
+    empty_windows = 0
     ema, started = 0.0, time.perf_counter()
 
     def select(ticket, iteration):
         if ticket.multiplier is None:
-            ticket.multiplier = base_focal / ticket.cpu.focal_length
+            focal = effective_focal(ticket.cpu) if pixel_lod else ticket.cpu.focal_length
+            ticket.multiplier = base_focal / focal
             if opt.vary_distance_multiplier and iteration % 10:
                 ticket.multiplier *= float(1 + torch.rand((), generator=distance_rng).pow(4) * 5)
         if ticket.ids is None or ticket.epoch != builder.generation:
@@ -198,9 +228,12 @@ def training(dataset, opt, pipe, saving_iterations, view_graph=None, runtime=Non
                     pool.invalidate()
                     del packet, grad
                     old_size = g.size
+                    detail = tracker.report(g, opt.densify_grad_threshold, iteration) if tracker else {}
                     dead = g.properties[:old_size, 13] <= math.log(.005/.995)
                     g.add_new_gs(cap_max=opt.cap_max, size=g.size, densification='classic',
-                                 densify_percent=opt.densify_percent, densify_threshold=opt.densify_grad_threshold)
+                                 densify_percent=opt.densify_percent, densify_threshold=opt.densify_grad_threshold,
+                                 max_leaf_fraction=getattr(opt, 'densify_max_leaf_fraction', 0.),
+                                 max_new_nodes=getattr(opt, 'densify_max_new_nodes', 0))
                     mask = torch.zeros(g.size, dtype=torch.bool)
                     mask[:old_size] = dead
                     mask &= g.nodes[:g.size, 2] == 0
@@ -209,6 +242,24 @@ def training(dataset, opt, pipe, saving_iterations, view_graph=None, runtime=Non
                         builder.cache.clear()  # full-refresh A/B, identical construction rules
                     builder.refresh(g)
                     pool.reset_scores(g.size)
+                    if tracker is not None:
+                        detail.update(new_nodes=g.size-old_size, split_parents=(g.size-old_size)//2,
+                            leaf_nodes_after=int((g.nodes[:g.size,2] == 0).sum()),
+                            score_space=getattr(opt, 'densify_score_space', 'pixel'))
+                        detail_file.write(json.dumps(detail) + chr(10))
+                        detail_file.flush()
+                        print('Detail:', json.dumps(detail))
+                        empty_windows = empty_windows + 1 if not detail['eligible_leaves'] else 0
+                        if empty_windows == 3:
+                            import warnings
+                            warnings.warn('No eligible leaves in three windows; inspect visible_leaves and score_max in densification.jsonl')
+                        tracker.reset()
+                    if settings.adaptive_pool:
+                        old_bytes = (pool.state.numel()*pool.state.element_size() + pool.scores.numel()*4) if pool.state is not None else 0
+                        desired = choose_capacity(old_bytes)
+                        if desired != pool.capacity:
+                            pool.resize_empty(desired)
+
             else:
                 if iteration < opt.iterations:
                     with profile.phase('adam'):
@@ -227,7 +278,7 @@ def training(dataset, opt, pipe, saving_iterations, view_graph=None, runtime=Non
             progress.update(1)
             profile.finish(active=active_count, total=g.size, loss=scalar,
                 allocated_bytes=torch.cuda.memory_allocated(), reserved_bytes=torch.cuda.memory_reserved(),
-                peak_allocated_bytes=torch.cuda.max_memory_allocated(), image_uploaded_bytes=transfer.uploaded_bytes,
+                peak_allocated_bytes=torch.cuda.max_memory_allocated(), pool_capacity=pool.capacity, image_uploaded_bytes=transfer.uploaded_bytes,
                 image_prefetch_uploads=transfer.prefetch_uploads, graph_captures=adam_graph.captures,
                 graph_replays=adam_graph.replays, **pool.stats, **builder.stats)
     finally:
@@ -244,4 +295,5 @@ def training(dataset, opt, pipe, saving_iterations, view_graph=None, runtime=Non
                 pool.close()
                 profile.close()
                 progress.close()
+                detail_file.close()
     print(f'Resident v2 fine training: {time.perf_counter()-started:.2f} seconds')

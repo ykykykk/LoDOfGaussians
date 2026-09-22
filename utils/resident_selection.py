@@ -21,10 +21,11 @@ def select_gaussians(gaussians, camera, opt, distance_multiplier, native=None):
         if bounds is None:
             bounds = g.scaling_activation(g.upper_tree_scaling.max(dim=-1).values) * 3.0
     planes = g.extract_frustum_planes(camera.full_proj_transform)
+    weight = distance_multiplier ** 2 if getattr(opt, "lod_pixel_consistent", False) else distance_multiplier
     if native is not None and device.type == "cuda":
         mask = native.upper_cut(nodes.contiguous(), g.upper_tree_xyz.contiguous(), bounds.contiguous(),
                                 g.min_distance_squared.contiguous(), planes.contiguous(),
-                                camera.camera_center.contiguous(), float(distance_multiplier),
+                                camera.camera_center.contiguous(), float(weight),
                                 opt.use_frustum_culling)
         order = getattr(g, "upper_cut_order", None)
         if order is None:
@@ -40,7 +41,7 @@ def select_gaussians(gaussians, camera, opt, distance_multiplier, native=None):
 
         def detail(indices):
             return g.min_distance_squared[indices] > (
-                camera.camera_center - g.upper_tree_xyz[indices]).square().sum(dim=-1) * distance_multiplier
+                camera.camera_center - g.upper_tree_xyz[indices]).square().sum(dim=-1) * weight
 
         cut = g.cut_hierarchy_on_condition(nodes, detail, return_upper_tree=False,
                                            root_node=0, leave_out_of_cut_condition=visible)

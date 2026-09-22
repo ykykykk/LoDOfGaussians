@@ -13,7 +13,10 @@ def prepare_gsplat_windows():
 
     import torch.utils.cpp_extension as cpp_extension
 
-    cpp_extension.SUBPROCESS_DECODE_ARGS = ("utf-8",)
+    os.environ.setdefault("VSLANG", "1033")
+    # MSVC may emit an OEM/ANSI banner even when Python uses UTF-8. Version
+    # parsing is ASCII; preserve diagnostics without failing the build on bytes.
+    cpp_extension.SUBPROCESS_DECODE_ARGS = ("utf-8", "replace")
     original = cpp_extension._jit_compile
     if getattr(original, "_alod_windows_compatible", False):
         return

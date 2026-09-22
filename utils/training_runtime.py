@@ -6,6 +6,7 @@ from torch.utils.data import DataLoader
 
 
 CAMERA_TENSORS = (
+    "K_train",
     "original_image", "alpha_mask", "invdepthmap", "depth_mask",
     "world_view_transform", "projection_matrix", "full_proj_transform",
     "full_proj_transform_inverse", "camera_center",
@@ -32,6 +33,10 @@ def make_camera_loader(cameras, opt, *, shuffle: bool):
         raise ValueError("data_workers must be >= 0; data_prefetch_factor must be >= 1")
     if len(cameras) == 0:
         raise ValueError("The training camera dataset is empty")
+    cache_gib = float(getattr(opt, "coarse_image_cache_gib", 0.0))
+    if cache_gib > 0:
+        from utils.view_pipeline import CachedCameras
+        cameras = CachedCameras(cameras, int(cache_gib * 2**30) // max(1, workers))
     kwargs = dict(
         batch_size=1, num_workers=workers, shuffle=shuffle,
         collate_fn=direct_collate,
