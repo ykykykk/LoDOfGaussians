@@ -34,6 +34,8 @@ if __name__ == '__main__':
                         help="Resident runtime version; overrides JSON resident_version (default: 2).")
     parser.add_argument('--seed', type=int, default=None, help="Optional RNG seed for controlled A/B runs.")
     parser.add_argument('--resume_checkpoint', default='', help='Resident v2 full-state checkpoint; also use --skip_if_exists.')
+    parser.add_argument('--allow_growth_resume', action='store_true',
+                        help='Allow only a larger resident-v2 node budget and extended split schedule when resuming.')
     args = parser.parse_args()
 
     if args.seed is not None:
@@ -123,6 +125,10 @@ if __name__ == '__main__':
         if training_backend != 'resident' or version != 2 or not args.skip_if_exists:
             raise ValueError('Resume requires resident v2 and --skip_if_exists')
         training_kwargs['resume_checkpoint'] = args.resume_checkpoint
+        if args.allow_growth_resume:
+            training_kwargs['allow_growth_resume'] = True
+    elif args.allow_growth_resume:
+        raise ValueError('--allow_growth_resume requires --resume_checkpoint')
 
     if general and (training_backend != 'resident' or version != 2):
         raise ValueError('General policy requires resident v2')

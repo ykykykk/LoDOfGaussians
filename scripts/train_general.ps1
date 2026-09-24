@@ -12,7 +12,8 @@ param(
     [string]$Toolset = '14.44',
     [switch]$PlanOnly,
     [switch]$SkipIfExists,
-    [string]$ResumeCheckpoint = ''
+    [string]$ResumeCheckpoint = '',
+    [switch]$AllowGrowthResume
 )
 $ErrorActionPreference = 'Stop'
 [Console]::InputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
@@ -55,5 +56,6 @@ if ($CoarseIterations -gt 0) { $TrainArgs += @('--coarse_iterations',"$CoarseIte
 if ($PlanOnly) { $TrainArgs += '--plan_only' }
 if ($SkipIfExists) { $TrainArgs += '--skip_if_exists' }
 if ($ResumeCheckpoint) { $TrainArgs += @('--resume_checkpoint', $ResumeCheckpoint) }
+if ($AllowGrowthResume) { $TrainArgs += '--allow_growth_resume' }
 & $Python @TrainArgs
 if ($LASTEXITCODE -ne 0) { throw "Training exited with code $LASTEXITCODE" }

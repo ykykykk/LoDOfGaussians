@@ -81,6 +81,16 @@ def test_bounded_schedule_and_input_immutability(views):
     small=resolve_plan(c,{'training_views':views,'decoded_training_bytes':80*2**30},8*2**30)
     assert small['data_workers']==4 and small['resolved_policy']['cache_budget_bytes']<=2*2**30
 
+
+def test_continuation_keeps_original_lr_schedule_and_extended_split_window():
+    c=json.loads((ROOT/'configs/general_balanced.json').read_text())
+    c.update(iterations=60, position_lr_max_steps=30, densify_from_iter=5,
+             densify_until_iter=48, densification_interval=5)
+    c['general_policy']['preserve_fine_schedule']=True
+    p=resolve_plan(c,{'training_views':42,'decoded_training_bytes':4*2**30},32*2**30)
+    assert [p[k] for k in ('position_lr_max_steps','densify_from_iter',
+                            'densify_until_iter','densification_interval')]==[30,5,48,5]
+
 def test_explicit_budgets():
     c=json.loads((ROOT/'configs/general_balanced.json').read_text());c.update(iterations=1234,coarse_iterations=17)
     p=resolve_plan(c,{'training_views':42,'decoded_training_bytes':1000},2**30)

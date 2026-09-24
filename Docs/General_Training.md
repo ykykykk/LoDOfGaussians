@@ -70,6 +70,8 @@ Windows 长训练还应检查 `reserved_bytes`：缓存分配可能被 WDDM 放�
 
 Resident v2 可设置 `resident.checkpoint_every=1000`，每 1000 步原子更新 `resident_latest.pt`。检查点包含参数、Adam 两阶矩、树结构、增点统计、迭代位置和 Torch 随机状态；保存失败会保留上一份完整文件。恢复使用相同配置、数据、粗模型和随机种子，给 `scripts/train_general.ps1` 传入 `-SkipIfExists -ResumeCheckpoint <resident_latest.pt>`。恢复会跳过已完成的视图采样，不重跑粗训练；目前检查点要求 `vary_distance_multiplier=false`。`.dhier`/PLY 仅为模型导出，不包含完整优化器状态。
 
+继续已完成模型的增点训练时，用新输出目录复用同一粗模型，显式传入 `-AllowGrowthResume`。此选项只允许增加总节点上限、每轮新增节点数、总步数，并调整增点截止步及间隔；数据、粗模型、其余优化参数及 Adam 状态保持一致。新增点窗口从零评分和可见性重新累计。若使用通用策略，设置 `general_policy.preserve_fine_schedule=true`，显式给出延长后的增点截止步和间隔，并保持原 `position_lr_max_steps`，避免恢复时学习率跳升；原始检查点和旧输出继续保留。
+
 `densification.jsonl` 区分实际可见叶节点、正梯度叶节点、超过阈值节点以及实际分裂数量。零梯度不会被误当成不可见；连续三个窗口没有合格节点时警告。日志里的总节点包含 LoD 父级，PLY 只导出最细叶节点，二者应分别检查。
 
 通用模式会保存 `dataset_manifest.json`。`-SkipIfExists` 复用粗训练前检查相机文件、图像/稀疏点元数据、训练分辨率、随机种子和粗训练关键设置。缺失清单或不匹配时使用新输出目录。指纹不是所有图片的全内容哈希，预检也不能证明位姿正确。

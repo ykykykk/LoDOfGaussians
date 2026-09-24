@@ -101,7 +101,8 @@ def _backward(packet, camera, g, opt, pipe, background, profile):
     return loss.detach(), raw.grad
 
 
-def training(dataset, opt, pipe, saving_iterations, view_graph=None, runtime=None, resume_checkpoint=None):
+def training(dataset, opt, pipe, saving_iterations, view_graph=None, runtime=None,
+             resume_checkpoint=None, allow_growth_resume=False):
     from scene import Scene, GaussianModel
     from utils.general_utils import get_expon_lr_func
     from utils.training_runtime import shutdown_camera_loader
@@ -120,7 +121,8 @@ def training(dataset, opt, pipe, saving_iterations, view_graph=None, runtime=Non
     contract = (dict(source=str(Path(dataset.source_path).resolve()), resolution=dataset.resolution,
                     hierarchy=str(Path(dataset.hierarchy).resolve()), options=vars(opt), pipeline=vars(pipe))
                 if settings.checkpoint_every or resume_checkpoint else {})
-    restored = load_checkpoint(resume_checkpoint, g, contract, opt.iterations) if resume_checkpoint else None
+    restored = load_checkpoint(resume_checkpoint, g, contract, opt.iterations,
+                               allow_growth=allow_growth_resume) if resume_checkpoint else None
     first_iteration = restored['iteration'] + 1 if restored else 0
     cameras = scene.getTrainCameras()
     if not len(cameras):

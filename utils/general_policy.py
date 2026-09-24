@@ -23,11 +23,12 @@ def resolve_plan(config, dataset, available_ram):
     steps = out['iterations']
     if steps < 10 or out['coarse_iterations'] < 2:
         raise ValueError('Fine budget must be >=10 and coarse budget >=2')
-    out['position_lr_max_steps'] = steps
-    out['densify_from_iter'] = min(500, max(1, steps // 20))
-    out['densify_until_iter'] = max(out['densify_from_iter'] + 1, int(steps * .8))
-    span = out['densify_until_iter'] - out['densify_from_iter']
-    out['densification_interval'] = max(1, math.ceil(span / 64))
+    if not policy.get('preserve_fine_schedule', False):
+        out['position_lr_max_steps'] = steps
+        out['densify_from_iter'] = min(500, max(1, steps // 20))
+        out['densify_until_iter'] = max(out['densify_from_iter'] + 1, int(steps * .8))
+        span = out['densify_until_iter'] - out['densify_from_iter']
+        out['densification_interval'] = max(1, math.ceil(span / 64))
     requested = int(out.get('data_workers', 4))
     runtime = out.setdefault('resident', {})
     # Full CPU caching on small datasets avoids Windows IPC of whole float images.
