@@ -159,6 +159,7 @@ class ViewTicket:
     ids: object = None
     epoch: int = -1
     multiplier: object = None
+    selected_multiplier: object = None
 
 
 class CameraTransfer:

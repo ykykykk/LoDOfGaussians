@@ -2,6 +2,33 @@
 import torch
 
 
+@torch.no_grad()
+def select_with_budget(g, camera, opt, multiplier, native=None, max_active_nodes=0):
+    """Use coarser hierarchy cuts, never truncate arbitrary Gaussian rows."""
+    ids = select_gaussians(g, camera, opt, multiplier, native=native)
+    if max_active_nodes <= 0 or len(ids) <= max_active_nodes:
+        return ids, multiplier
+    low, high = multiplier, multiplier
+    for _ in range(20):
+        high *= 2
+        candidate = select_gaussians(g, camera, opt, high, native=native)
+        if len(candidate) <= max_active_nodes:
+            ids = candidate
+            break
+        low = high
+    else:
+        raise RuntimeError('Active-node budget cannot fit even a coarse hierarchy cut')
+    # Recover detail between the last over-budget and first fitting cuts.
+    for _ in range(4):
+        middle = (low + high) / 2
+        candidate = select_gaussians(g, camera, opt, middle, native=native)
+        if len(candidate) <= max_active_nodes:
+            high, ids = middle, candidate
+        else:
+            low = middle
+    return ids, high
+
+
 def split_upper_cut(nodes, cut):
     rows = nodes[cut]
     is_spt = (rows[:, 2] == 0) & (rows[:, 3] >= 0)

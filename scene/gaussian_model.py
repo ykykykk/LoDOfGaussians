@@ -507,7 +507,7 @@ class GaussianModel:
     
     
     
-    def compact_gaussians(self, device, max_number_of_gaussians, densification, training=True, prune_unused_gaussians=True):
+    def compact_gaussians(self, device, max_number_of_gaussians, densification, training=True, prune_unused_gaussians=True, allocator=None):
         if max_number_of_gaussians is None:
             max_number_of_gaussians = len(self._xyz)
         number_gaussian_properties = [14, 23, 38, 59]
@@ -517,9 +517,15 @@ class GaussianModel:
             number_gaussian_properties = number_gaussian_properties[self.max_sh_degree] * 3
         else:
             number_gaussian_properties = number_gaussian_properties[self.max_sh_degree]
-        self.properties = torch.zeros((max_number_of_gaussians, number_gaussian_properties) , device=device)
+        def allocate(shape, dtype=torch.float32):
+            if allocator is not None:
+                if torch.device(device).type != 'cpu':
+                    raise ValueError('Mapped backing requires CPU storage')
+                return allocator(shape, dtype)
+            return torch.zeros(shape, device=device, dtype=dtype)
+        self.properties = allocate((max_number_of_gaussians, number_gaussian_properties))
         if densification == "classic":
-            self._densification_criterium = torch.zeros(max_number_of_gaussians, device=device, dtype=torch.float)
+            self._densification_criterium = allocate((max_number_of_gaussians,))
         if prune_unused_gaussians:
             self._contributed = torch.zeros(max_number_of_gaussians, device=device, dtype=torch.bool)
         
@@ -550,7 +556,7 @@ class GaussianModel:
             current_index += size
             
             
-        new_nodes = torch.zeros((max_number_of_gaussians, 6), device=device, dtype=torch.int32)    
+        new_nodes = allocate((max_number_of_gaussians, 6), dtype=torch.int32)
         new_nodes[:len(self.nodes), :6] = self.nodes
         self.nodes = new_nodes
         

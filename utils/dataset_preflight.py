@@ -8,9 +8,13 @@ from PIL import Image
 from utils.camera_geometry import image_size
 
 
-def inspect_dataset(root, images_dir=None, masks_dir=None, resolution=2, hold=100):
+def inspect_dataset(root, images_dir=None, masks_dir=None, resolution=2, hold=100, *, fingerprint_root=None):
     from utils.read_write_model import read_cameras_binary, read_images_binary, read_cameras_text, read_images_text
     root = Path(root).resolve()
+    def fingerprint_path(path):
+        if fingerprint_root is not None and path.is_relative_to(root):
+            return str(Path(fingerprint_root) / path.relative_to(root))
+        return str(path)
     sparse = root / 'sparse' / '0'
     images_dir = Path(images_dir or root / 'images').resolve()
     masks_dir = Path(masks_dir).resolve() if masks_dir else None
@@ -55,7 +59,7 @@ def inspect_dataset(root, images_dir=None, masks_dir=None, resolution=2, hold=10
             decoded += tw * th * 16 + 1024
         sizes.append((tw, th))
         stat = path.stat()
-        record = [str(path), stat.st_size, stat.st_mtime_ns, w, h]
+        record = [fingerprint_path(path), stat.st_size, stat.st_mtime_ns, w, h]
         mask = None
         if masks_dir:
             mask = next((masks_dir/Path(image.name).with_suffix(suffix) for suffix in ('.png','.JPG')
@@ -64,7 +68,7 @@ def inspect_dataset(root, images_dir=None, masks_dir=None, resolution=2, hold=10
                 with Image.open(mask) as source:
                     if source.size != (w,h):
                         raise ValueError(f'Mask/image size mismatch: {mask}')
-                stat = mask.stat(); record += [str(mask),stat.st_size,stat.st_mtime_ns]; masks += 1
+                stat = mask.stat(); record += [fingerprint_path(mask),stat.st_size,stat.st_mtime_ns]; masks += 1
         if not test:
             # Conservative for alpha, actual external masks and non-RGB formats.
             compact += tw * th * (4 if byte_rgb and mask is None else 16) + 1024
@@ -81,7 +85,7 @@ def inspect_dataset(root, images_dir=None, masks_dir=None, resolution=2, hold=10
     if points is None:
         raise FileNotFoundError('Missing COLMAP sparse points3D model')
     stat = points.stat()
-    digest.update(json.dumps([records,str(points),stat.st_size,stat.st_mtime_ns,resolution,hold]).encode())
+    digest.update(json.dumps([records,fingerprint_path(points),stat.st_size,stat.st_mtime_ns,resolution,hold]).encode())
     return dict(schema=2, input_fingerprint=digest.hexdigest(), images=len(ordered),
         training_views=training_views, test_views=len(ordered)-training_views,
         cameras=len(cameras), masks=masks, resolution=resolution,

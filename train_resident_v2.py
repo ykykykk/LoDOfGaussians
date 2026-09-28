@@ -10,13 +10,14 @@ from pathlib import Path
 import platform
 import time
 
+import numpy as np
 import torch
 from utils.incremental_spt import IncrementalSPT
 from utils.camera_geometry import screen_scores, effective_focal
 from utils.general_policy import DetailWindow, relative_spt_volume
 from utils.resident_pool import capacity_for_budget, cuda_available_bytes
 from utils.resident_pool_v2 import StreamingResidentPool
-from utils.resident_selection import select_gaussians
+from utils.resident_selection import select_with_budget
 from utils.resident_native import load_native, native_status
 from utils.adam_graph import PacketAdamGraph
 from utils.training_profile import TrainingProfile
@@ -42,8 +43,17 @@ class ResidentOptions:
     graph_min_reuse: int = 8
     adaptive_pool: bool = False
     checkpoint_every: int = 0
+    host_storage: str = 'ram'
+    host_directory: str = ''
+    max_active_nodes: int = 0
 
     def __post_init__(self):
+        if self.host_storage not in ('ram', 'mmap'):
+            raise ValueError('host_storage must be ram or mmap')
+        if self.host_storage == 'mmap' and not self.host_directory:
+            raise ValueError('mmap storage requires an explicit SSD host_directory')
+        if self.max_active_nodes < 0:
+            raise ValueError('max_active_nodes must be nonnegative')
         if (self.pool_gib <= 0 or self.headroom_gib < 0 or self.transfer_rows <= 0
                 or self.checkpoint_every < 0 or self.profile_every < 0 or self.gaussian_prefetch_rows < 0
                 or self.image_prefetch_mib < 0 or self.image_cache_gib < 0 or self.graph_min_reuse < 1):
@@ -101,6 +111,27 @@ def _backward(packet, camera, g, opt, pipe, background, profile):
     return loss.detach(), raw.grad
 
 
+def _grow_cpu_backing(g, pool, required, cap_max):
+    """Grow only used CPU rows; the configured node limit is a logical ceiling."""
+    current = len(g.properties)
+    if required <= current:
+        return
+    capacity = min(cap_max, max(required, math.ceil(current * 1.25)))
+    if capacity < required or pool.used or pool.active is not None or pool.dirty.any():
+        raise RuntimeError('Grow resident backing only after flushing and invalidating the pool')
+    properties = torch.zeros((capacity, g.properties.shape[1]), dtype=g.properties.dtype)
+    properties[:g.size].copy_(g.properties[:g.size])
+    g.properties = pool.host = properties
+    nodes = torch.zeros((capacity, g.nodes.shape[1]), dtype=g.nodes.dtype)
+    nodes[:g.size].copy_(g.nodes[:g.size])
+    g.nodes = nodes
+    scores = torch.zeros(capacity, dtype=g._densification_criterium.dtype)
+    scores[:g.size].copy_(g._densification_criterium[:g.size])
+    g._densification_criterium = pool.host_scores = scores
+    pool.to_slot = np.full(capacity, -1, dtype=np.int64)
+    print(f'Resident CPU backing grown from {current:,} to {capacity:,} slots', flush=True)
+
+
 def training(dataset, opt, pipe, saving_iterations, view_graph=None, runtime=None,
              resume_checkpoint=None, allow_growth_resume=False):
     from scene import Scene, GaussianModel
@@ -116,7 +147,22 @@ def training(dataset, opt, pipe, saving_iterations, view_graph=None, runtime=Non
     g.max_sh_degree, g.active_sh_degree = opt.SH_degree, min(1, opt.SH_degree)
     for name in ('_xyz', '_opacity', '_rotation', '_scaling', '_features_dc', '_features_rest'):
         getattr(g, name).requires_grad_(False)
-    g.compact_gaussians('cpu', opt.cap_max, densification='classic', prune_unused_gaussians=False)
+    initial_capacity = opt.cap_max
+    if settings.host_storage == 'ram' and getattr(opt, 'densify_max_new_nodes', 0) > 0:
+        starting_size = len(g._xyz)
+        if resume_checkpoint:
+            preview = torch.load(resume_checkpoint, map_location='cpu', weights_only=True, mmap=True)
+            starting_size = max(starting_size, int(preview['size']))
+            del preview
+        initial_capacity = min(opt.cap_max, starting_size + 2 * opt.densify_max_new_nodes)
+    backing = None
+    if settings.host_storage == 'mmap':
+        from utils.resident_storage import MappedHostStorage
+        backing = MappedHostStorage(settings.host_directory)
+        print(f'Resident SSD backing: {backing.path}', flush=True)
+    g.compact_gaussians('cpu', initial_capacity, densification='classic', prune_unused_gaussians=False,
+                       allocator=backing.allocate if backing else None)
+    print(f'Resident CPU backing: {initial_capacity:,} slots; limit: {opt.cap_max:,}', flush=True)
     from utils.resident_checkpoint import load_checkpoint, save_checkpoint
     contract = (dict(source=str(Path(dataset.source_path).resolve()), resolution=dataset.resolution,
                     hierarchy=str(Path(dataset.hierarchy).resolve()), options=vars(opt), pipeline=vars(pipe))
@@ -175,7 +221,8 @@ def training(dataset, opt, pipe, saving_iterations, view_graph=None, runtime=Non
         property_width=width, torch=torch.__version__, cuda=torch.version.cuda,
         gpu=torch.cuda.get_device_name(), platform=platform.platform(), resolution=dataset.resolution,
         iterations=opt.iterations, seed=seed, optimization=vars(opt),
-        scene_radius=g.spatial_lr_scale, spt_root_volume=root_volume, lod_base_focal=base_focal), indent=2), encoding='utf-8')
+        scene_radius=g.spatial_lr_scale, spt_root_volume=root_volume, lod_base_focal=base_focal,
+        host_backing=str(backing.path) if backing else None), indent=2), encoding='utf-8')
     print(f'Resident v2: {capacity:,} slots; native={native is not None}; incremental_spt={settings.incremental_spt}')
     progress = tqdm(total=opt.iterations+1, initial=first_iteration, desc='Resident v2 fine training')
     ticket = None
@@ -201,7 +248,9 @@ def training(dataset, opt, pipe, saving_iterations, view_graph=None, runtime=Non
             if opt.vary_distance_multiplier and iteration % 10:
                 ticket.multiplier *= float(1 + torch.rand((), generator=distance_rng).pow(4) * 5)
         if ticket.ids is None or ticket.epoch != builder.generation:
-            ticket.ids = select_gaussians(g, transfer.metadata(ticket), opt, ticket.multiplier, native=native)
+            ticket.ids, ticket.selected_multiplier = select_with_budget(
+                g, transfer.metadata(ticket), opt, ticket.multiplier, native=native,
+                max_active_nodes=settings.max_active_nodes)
             ticket.epoch = builder.generation
         return ticket.ids
 
@@ -223,6 +272,7 @@ def training(dataset, opt, pipe, saving_iterations, view_graph=None, runtime=Non
                 camera = transfer.ready(ticket)
             with profile.phase('hierarchy_cut'):
                 ids = select(ticket, iteration)
+                selected_multiplier = ticket.selected_multiplier
             if not len(ids):
                 raise RuntimeError(f'empty cut for {camera.image_name}; check camera alignment and culling')
             with profile.phase('cache_prepare'):
@@ -263,6 +313,9 @@ def training(dataset, opt, pipe, saving_iterations, view_graph=None, runtime=Non
                     old_size = g.size
                     detail = tracker.report(g, opt.densify_grad_threshold, iteration) if tracker else {}
                     dead = g.properties[:old_size, 13] <= math.log(.005/.995)
+                    if getattr(opt, 'densify_max_new_nodes', 0) > 0:
+                        needed = old_size + min(opt.densify_max_new_nodes, opt.cap_max - old_size)
+                        _grow_cpu_backing(g, pool, needed, opt.cap_max)
                     g.add_new_gs(cap_max=opt.cap_max, size=g.size, densification='classic',
                                  densify_percent=opt.densify_percent, densify_threshold=opt.densify_grad_threshold,
                                  max_leaf_fraction=getattr(opt, 'densify_max_leaf_fraction', 0.),
@@ -318,6 +371,9 @@ def training(dataset, opt, pipe, saving_iterations, view_graph=None, runtime=Non
             profile.finish(active=active_count, total=g.size, loss=scalar,
                 allocated_bytes=torch.cuda.memory_allocated(), reserved_bytes=torch.cuda.memory_reserved(),
                 peak_allocated_bytes=torch.cuda.max_memory_allocated(), pool_capacity=pool.capacity, image_uploaded_bytes=transfer.uploaded_bytes,
+                host_capacity=len(g.properties), host_storage=settings.host_storage,
+                max_active_nodes=settings.max_active_nodes,
+                selected_lod_multiplier=selected_multiplier,
                 image_prefetch_uploads=transfer.prefetch_uploads, graph_captures=adam_graph.captures,
                 graph_replays=adam_graph.replays, **pool.stats, **builder.stats)
     finally:
@@ -332,6 +388,8 @@ def training(dataset, opt, pipe, saving_iterations, view_graph=None, runtime=Non
             finally:
                 adam_graph.reset()
                 pool.close()
+                if backing:
+                    backing.flush()
                 profile.close()
                 progress.close()
                 detail_file.close()
