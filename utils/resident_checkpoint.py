@@ -34,7 +34,7 @@ def _growth_contract_matches(old, new, iteration):
                'densify_until_iter', 'densification_interval'}
     if a.keys() != b.keys() or any(a[key] != b[key] for key in a.keys() - allowed):
         return False
-    return (b['iterations'] > a['iterations'] > iteration
+    return (b['iterations'] >= a['iterations'] > iteration
             and b['cap_max'] > a['cap_max']
             and b['densify_max_new_nodes'] > a['densify_max_new_nodes']
             and iteration < b['densify_until_iter'] < b['iterations']
