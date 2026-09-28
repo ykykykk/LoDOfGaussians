@@ -43,6 +43,8 @@ class ResidentOptions:
     host_directory: str = ''
     max_active_nodes: int = 0
     representation: str = "lod"
+    flat_direct: bool = False
+    flat_native: bool = False
 
     def __post_init__(self):
         if self.representation not in ('lod', 'flat'):
@@ -194,22 +196,30 @@ def training(dataset, opt, pipe, saving_iterations, view_graph=None, runtime=Non
                                  opt.min_SPT_size, opt.use_bounding_spheres)
     builder.refresh(g)
     native = load_native(settings.native_ops)
+    if settings.representation == 'flat' and settings.flat_native:
+        builder.native = native
     width = g.properties.shape[1] // 3
-    def choose_capacity(existing_bytes=0):
+    def choose_capacity(existing_bytes=0, released_store_bytes=0):
         allocated = torch.cuda.memory_allocated()
         # Retain space for observed transient render/backward allocations.
         # A new, denser view can still exceed this historical peak.
-        transient = max(0, torch.cuda.max_memory_allocated() - allocated)
+        transient = max(0, torch.cuda.max_memory_allocated() - allocated - released_store_bytes)
         headroom = max(settings.headroom_gib, (transient * 1.25 + 2**30) / 2**30)
-        requested = min(opt.cache_size, opt.cap_max)
+        requested = opt.cap_max if settings.representation == 'flat' and settings.flat_direct else min(opt.cache_size, opt.cap_max)
         if settings.adaptive_pool:
             requested = min(requested, g.size + max(65536, g.size // 4))
         return capacity_for_budget(requested, width, cuda_available_bytes(existing_bytes),
                                    settings.pool_gib, headroom)
+    def make_pool(capacity):
+        if settings.representation == 'flat' and settings.flat_direct and native is not None and g.size <= capacity:
+            from utils.direct_resident_pool import DirectResidentPool
+            return DirectResidentPool(g.properties, g._densification_criterium, g.size,
+                                      live_size=g.size, ops=native, transfer_rows=settings.transfer_rows)
+        return StreamingResidentPool(g.properties, g._densification_criterium, capacity,
+                                     transfer_rows=settings.transfer_rows, pin_staging=settings.pin_staging,
+                                     ops=native, prefetch_rows=settings.gaussian_prefetch_rows)
     capacity = choose_capacity()
-    pool = StreamingResidentPool(g.properties, g._densification_criterium, capacity,
-                                 transfer_rows=settings.transfer_rows, pin_staging=settings.pin_staging,
-                                 ops=native, prefetch_rows=settings.gaussian_prefetch_rows)
+    pool = make_pool(capacity)
     output = Path(dataset.output_path)
     output.mkdir(parents=True, exist_ok=True)
     profile = TrainingProfile(output / 'resident_profile.jsonl', settings.profile_every, append=bool(restored))
@@ -324,6 +334,7 @@ def training(dataset, opt, pipe, saving_iterations, view_graph=None, runtime=Non
                         g.save_hierarchy(str(output), file_name=filename)
             if iteration < opt.iterations and split:
                 with profile.phase('densify_rebuild'):
+                    released_store_bytes = sum(t.numel()*t.element_size() for t in (pool.state, pool.scores) if t is not None)
                     pool.flush()
                     adam_graph.reset()
                     pool.invalidate()
@@ -362,7 +373,14 @@ def training(dataset, opt, pipe, saving_iterations, view_graph=None, runtime=Non
                             import warnings
                             warnings.warn('No eligible leaves in three windows; inspect visible_leaves and score_max in densification.jsonl')
                         tracker.reset()
-                    if settings.adaptive_pool:
+                    if settings.flat_direct and settings.representation == 'flat':
+                        # The released resident store is not render workspace.
+                        desired = choose_capacity(released_store_bytes=released_store_bytes)
+                        counters = dict(pool.stats)
+                        pool.close()
+                        pool = make_pool(desired)
+                        pool.stats.update(counters)
+                    elif settings.adaptive_pool:
                         old_bytes = (pool.state.numel()*pool.state.element_size() + pool.scores.numel()*4) if pool.state is not None else 0
                         desired = choose_capacity(old_bytes)
                         if desired != pool.capacity:
@@ -398,6 +416,7 @@ def training(dataset, opt, pipe, saving_iterations, view_graph=None, runtime=Non
                 host_capacity=len(g.properties), host_storage=settings.host_storage,
                 max_active_nodes=settings.max_active_nodes,
                 selected_lod_multiplier=selected_multiplier,
+                direct_resident=type(pool).__name__ == 'DirectResidentPool',
                 image_prefetch_uploads=transfer.prefetch_uploads, graph_captures=adam_graph.captures,
                 graph_replays=adam_graph.replays, **pool.stats, **builder.stats)
     finally:

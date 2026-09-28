@@ -72,7 +72,9 @@
     "host_storage": "ram",
     "host_directory": "",
     "max_active_nodes": 0,
-    "representation": "flat"
+    "representation": "flat",
+    "flat_direct": true,
+    "flat_native": true
   },
   "densify_score_space": "ndc",
   "densify_max_leaf_fraction": 0.15,

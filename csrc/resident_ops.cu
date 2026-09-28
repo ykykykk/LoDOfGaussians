@@ -146,3 +146,65 @@ torch::Tensor upper_cut_cuda(torch::Tensor nodes, torch::Tensor xyz,
     }
     return mask;
 }
+
+// Exact four-plane sphere test; no LoD substitution or point budget.
+__global__ void flat_visible_kernel(const float* bounds, const float* planes, bool* mask, int64_t n) {
+    const int64_t i = int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    bool keep = true;
+    for (int p = 0; p < 4; ++p) {
+        const float d = bounds[i*4] * planes[p*4] + bounds[i*4+1] * planes[p*4+1]
+                      + bounds[i*4+2] * planes[p*4+2] + planes[p*4+3];
+        keep = keep && (d + bounds[i*4+3] >= 0.f);
+    }
+    mask[i] = keep;
+}
+
+__global__ void update_bounds_kernel(float* bounds, const int64_t* ids, const float* raw,
+                                     int64_t n, int64_t capacity, int64_t stride) {
+    const int64_t i = int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const int64_t id = ids[i];
+    if (id < 0 || id >= capacity) return;
+    const float* r = raw + i * stride;
+    bounds[id*4] = r[0]; bounds[id*4+1] = r[1]; bounds[id*4+2] = r[2];
+    // Preserve Torch amax NaN propagation (fmaxf alone suppresses NaNs).
+    const float largest = (isnan(r[3]) || isnan(r[4]) || isnan(r[5]))
+        ? nanf("") : fmaxf(r[3], fmaxf(r[4], r[5]));
+    bounds[id*4+3] = 3.f * expf(largest);
+}
+
+static void check_bounds(const torch::Tensor& bounds) {
+    CUDA_CONTIG(bounds); FP32(bounds);
+    TORCH_CHECK(bounds.dim() == 2 && bounds.size(1) == 4, "bounds must be FP32 [N,4]");
+}
+
+torch::Tensor flat_visible_cuda(torch::Tensor bounds, torch::Tensor planes) {
+    check_bounds(bounds); CUDA_CONTIG(planes); FP32(planes);
+    TORCH_CHECK(planes.dim() == 2 && planes.size(0) == 4 && planes.size(1) == 4, "planes must be [4,4]");
+    TORCH_CHECK(planes.device() == bounds.device(), "device mismatch");
+    c10::cuda::CUDAGuard guard(bounds.device());
+    const int64_t n = bounds.size(0);
+    auto mask = torch::empty({n}, bounds.options().dtype(torch::kBool));
+    if (n) {
+        flat_visible_kernel<<<(n+255)/256, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
+            bounds.data_ptr<float>(), planes.data_ptr<float>(), mask.data_ptr<bool>(), n);
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
+    }
+    return mask;
+}
+
+void update_bounds_cuda(torch::Tensor bounds, torch::Tensor ids, torch::Tensor raw) {
+    check_bounds(bounds); CUDA_CONTIG(ids); FP32(raw);
+    TORCH_CHECK(ids.dim() == 1 && ids.scalar_type() == torch::kInt64, "ids must be int64 [N]");
+    TORCH_CHECK(raw.is_cuda() && raw.dim() == 2 && raw.size(0) == ids.numel()
+                && raw.size(1) >= 6 && raw.stride(1) == 1 && raw.stride(0) >= raw.size(1), "invalid raw layout");
+    TORCH_CHECK(ids.device() == bounds.device() && raw.device() == bounds.device(), "device mismatch");
+    c10::cuda::CUDAGuard guard(bounds.device());
+    const int64_t n = ids.numel();
+    if (n) {
+        update_bounds_kernel<<<(n+255)/256, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
+            bounds.data_ptr<float>(), ids.data_ptr<int64_t>(), raw.data_ptr<float>(), n, bounds.size(0), raw.stride(0));
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
+    }
+}

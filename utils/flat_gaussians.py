@@ -97,10 +97,11 @@ class FlatSelector:
     No approximate point budget or LoD substitution. The four side planes match
     GaussianModel.extract_frustum_planes; renderer handles depth clipping.
     """
-    def __init__(self, g=None, device='cuda', chunk_size=262144, use_frustum_culling=True):
+    def __init__(self, g=None, device='cuda', chunk_size=262144, use_frustum_culling=True, native=None):
         self.device = torch.device(device)
         self.chunk_size = int(chunk_size)
         self.use_frustum_culling = use_frustum_culling
+        self.native = native
         self.generation = 0
         self.stats = {}
         self.bounds = None
@@ -120,6 +121,9 @@ class FlatSelector:
     @torch.no_grad()
     def update(self, ids, raw):
         ids = torch.as_tensor(ids, device=self.device, dtype=torch.long)
+        if self.native is not None and self.device.type == 'cuda':
+            self.native.update_bounds(self.bounds, ids.contiguous(), raw)
+            return
         self.bounds[ids, :3] = raw[:, :3]
         self.bounds[ids, 3] = raw[:, 3:6].amax(1).exp()*3
 
@@ -133,6 +137,12 @@ class FlatSelector:
             m = camera.full_proj_transform.to(self.device).T
             planes = torch.stack((m[3]+m[0], m[3]-m[0], m[3]+m[1], m[3]-m[1]))
             planes = planes / planes[:, :3].norm(dim=1, keepdim=True).clamp_min(1e-20)
+            if self.native is not None and self.device.type == 'cuda':
+                visible = self.native.flat_visible(self.bounds, planes.contiguous())
+                visible[:self.skybox_points] = True
+                ids = visible.nonzero().flatten().to(torch.int32)
+                self.stats = {'flat_selected': len(ids), 'flat_total': g.size, 'flat_generation': self.generation}
+                return ids
             parts = [torch.arange(self.skybox_points, dtype=torch.int32, device=self.device)]
             for start in range(self.skybox_points, g.size, self.chunk_size):
                 b = self.bounds[start:start+self.chunk_size]

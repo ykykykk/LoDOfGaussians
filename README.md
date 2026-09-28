@@ -2,6 +2,8 @@
 
 本分支使用 `configs/dji_flat_90m.json` 的 `resident.representation="flat"`：只保留实际高斯点和独立背景点，分裂时两个子点替换原点，不保留父高斯及其 Adam 状态。GPU 位置/半径镜像在 Adam 更新后同步，只用于视锥裁剪，不作 LoD 替换或数量截断。
 
+此配置同时启用 `resident.flat_direct=true` 和 `resident.flat_native=true`：模型在显存预算内时，全部参数及 Adam 常驻 GPU，点编号直接作为槽位，省去逐步 CPU 索引规划；超过预算则回退原流式缓存。融合 CUDA 内核执行视锥裁剪及边界更新，保留 FP32、原图和原损失。关闭这两个选项可使用原路径做对比；它们不改变检查点格式。模型整体驻留不代表单视角渲染一定不会超显存，仍预留渲染空间。
+
 从已有 SH1 Resident v2 检查点迁移，原文件保持不变：
 
 ```powershell
