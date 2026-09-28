@@ -22,7 +22,7 @@ def _morton_order(xyz):
 
 
 def densify_blocks(store, opt):
-    """Split scored scene rows; caller must flush/clear its GPU cache first.
+    """Split scored scene rows through a disk store or coherent cache adapter.
 
     All point-sized temporaries are bounded by two block capacities. Budget
     allocation uses only O(number-of-blocks) metadata. No checkpoint is committed

@@ -68,6 +68,26 @@ def crop_camera(camera, left, top, width, height, halo=8):
     return result
 
 
+def tile_rectangle(w, h, identity, iteration, seed, tile_size=2048, balanced=False):
+    """Data-free deterministic core geometry, also used to restore coverage clocks."""
+    if min(w, h, tile_size) <= 0 or iteration < 0:
+        raise ValueError('Invalid tile schedule')
+    nx, ny = math.ceil(w / tile_size), math.ceil(h / tile_size)
+    cycle, offset = divmod(int(iteration), nx * ny)
+    key = f'{seed}:{identity}:{w}:{h}:{tile_size}:{cycle}'.encode('utf-8')
+    order = list(range(nx * ny))
+    random.Random(int.from_bytes(hashlib.sha256(key).digest()[:8], 'little')).shuffle(order)
+    index = order[offset]
+    col, row = index % nx, index // nx
+    if balanced:
+        x, y = col * w // nx, row * h // ny
+        tw, th = (col + 1) * w // nx - x, (row + 1) * h // ny - y
+    else:
+        x, y = col * tile_size, row * tile_size
+        tw, th = min(tile_size, w-x), min(tile_size, h-y)
+    return x, y, tw, th, index, nx*ny, cycle
+
+
 def choose_training_tile(camera, iteration, seed, tile_size=2048, halo=8, balanced=False):
     """Select one shuffled-grid tile with no repeated core within a cycle.
 
@@ -84,20 +104,8 @@ def choose_training_tile(camera, iteration, seed, tile_size=2048, halo=8, balanc
         raise ValueError('tile_size must be a positive integer')
     tile_size = int(tile_size)
     w, h = int(camera.image_width), int(camera.image_height)
-    nx, ny = math.ceil(w / tile_size), math.ceil(h / tile_size)
-    cycle, offset = divmod(int(iteration), nx * ny)
     identity = getattr(camera, 'image_name', getattr(camera, 'uid', ''))
-    key = f'{seed}:{identity}:{w}:{h}:{tile_size}:{cycle}'.encode('utf-8')
-    order = list(range(nx * ny))
-    random.Random(int.from_bytes(hashlib.sha256(key).digest()[:8], 'little')).shuffle(order)
-    index = order[offset]
-    col, row = index % nx, index // nx
-    if balanced:
-        x, y = col * w // nx, row * h // ny
-        tw, th = (col + 1) * w // nx - x, (row + 1) * h // ny - y
-    else:
-        x, y = col * tile_size, row * tile_size
-        tw, th = min(tile_size, w-x), min(tile_size, h-y)
+    x, y, tw, th, index, count, cycle = tile_rectangle(w, h, identity, iteration, seed, tile_size, balanced)
     result = crop_camera(camera, x, y, tw, th, halo)
-    result.tile_index, result.tile_count, result.tile_cycle = index, nx * ny, cycle
+    result.tile_index, result.tile_count, result.tile_cycle = index, count, cycle
     return result

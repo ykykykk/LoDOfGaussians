@@ -8,6 +8,8 @@
     "balanced_tiles": true,
     "halo": 8,
     "tiles_per_camera": 4,
+    "decode_workers": 2,
+    "growth_backend": "resident",
     "pool_gib": 8,
     "headroom_gib": 6,
     "image_cache_gib": 2,

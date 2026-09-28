@@ -37,7 +37,17 @@
 
 配置继承断点的训练选项，包括增点截止步；仅提高上限不会重新开启已结束的分裂。`pool_gib` 默认 8 GiB，另留 6 GiB 渲染空间；显式 `capacity_rows` 可覆盖。超出单裁块缓存容量会报告所需容量，不能靠删除可见点继续。断点恢复会校验裁块采样参数，保持每个相机的覆盖进度。
 
-这里的步数是**裁块优化步**，2048 上限对 DJI 原图形成 15 个面积近似相等的裁块。每步处理像素比整图少，不能直接比较两者步/秒，也不能照搬整图训练的剩余步数来宣称相同收敛质量。当前约 2000 万点仍优先使用上面的全显存快路径；分页后端用于突破总模型驻留限制，尚未替代默认入口。测试、实施计划及容量边界见 [空间块实施记录](Docs/NoLoD_Spatial_Plan.md)。
+日志的 `iteration` 和 CLI `--steps` 是**裁块优化步**，2048 上限对 DJI 原图形成 15 个面积近似相等的裁块。`image_equivalent_progress` 则累积每块核心面积/原图面积：学习率日程、增点间隔/截止和配置 `iterations` 使用此覆盖量；Adam 偏差修正及 `checkpoint_every` 仍使用优化步数。恢复旧裁块断点时，按已保存相机访问序列重建覆盖量，保留参数及 Adam。新的覆盖量日程不会倒退或重做已完成的参数更新，但不能撤销旧日程造成的历史影响。
+
+两线程解码各自独占有界缓存，保持原相机顺序；增点默认保留 GPU 页，读取最新状态并在检查点统一写盘。`decode_workers=1`、`growth_backend="flush"` 可用于原执行方式对照。纯精修关闭增点时，缓存不再为未来点数预留无用页面，给整图渲染留出显存。
+
+每步处理像素比整图少，不能直接比较两者步/秒；相同像素覆盖量也不保证 Adam 更新或收敛结果相同。当前约 2000 万点仍优先使用上面的全显存快路径；分页后端用于突破总模型驻留限制，尚未替代默认入口。测试、实施计划及容量边界见 [空间块实施记录](Docs/NoLoD_Spatial_Plan.md) 和 [质量与吞吐对照](Docs/Paged_Quality_and_Throughput.md)。
+
+固定留出视角原生像素评估（只读断点，可输出中心 1024 像素细节图）：
+
+```powershell
+.venv/Scripts/python.exe tools/evaluate_block_quality.py --checkpoint NEW/run02 --output-json NEW/quality.json --camera-limit 5 --preview-dir NEW/previews
+```
 
 这是基于 [FelixWindisch/LoDOfGaussians](https://github.com/FelixWindisch/LoDOfGaussians) 上游历史维护的个人派生版本，面向 **Windows、单张 NVIDIA GPU、大场景、原尺寸照片和高点数训练**。原论文、算法与官方实现的作者归属属于上游作者；本仓库不是官方发布。
 

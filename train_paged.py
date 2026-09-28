@@ -90,6 +90,8 @@ def train(args):
     from utils.block_densification import densify_blocks
     from utils.general_utils import get_expon_lr_func
     from train_resident import parameter_rates
+    from utils.paged_progress import restore_progress, crossed_growth, maximum_updates
+    from utils.paged_camera_prefetch import PagedCameraPrefetch
 
     config = json.loads(Path(args.config).read_text(encoding='utf-8-sig')) if args.config else {}
     runtime_override = config.get('paged', {})
@@ -127,9 +129,8 @@ def train(args):
         alpha_masks=runtime.get('alpha_masks', 'masks'), depths='', eval=True,
         train_test_exp=False, resolution=contract['resolution'], data_device='cpu')
     info = readColmapSceneInfo(source, model.images, model.alpha_masks, '', True, False, opt.llff_hold)
-    cameras = CachedCameras(CameraDataset(info.train_cameras, model, 1, False),
-        max_bytes=int(float(runtime.get('image_cache_gib', 2))*2**30), compact_images=True)
-    if not len(cameras):
+    camera_dataset = CameraDataset(info.train_cameras, model, 1, False)
+    if not len(camera_dataset):
         raise ValueError('No training cameras')
     transfer = CameraTransfer()
     native = load_native('cuda')
@@ -137,6 +138,9 @@ def train(args):
     usable_bytes = min(float(runtime.get('pool_gib', 8))*2**30,
                        free_bytes - float(runtime.get('headroom_gib', 6))*2**30)
     capacity = int(runtime.get('capacity_rows', max(0, usable_bytes) // 280))
+    if opt.densify_until_iter <= 0:
+        # Refinement cannot append pages; unused growth slots only steal render memory.
+        capacity = min(capacity, len(store.blocks)*store.block_rows)
     pool = PagedGaussianPool(store, capacity, native)
     seed = int(metadata.get('seed', 0))
     if metadata.get('rng') is not None:
@@ -148,7 +152,14 @@ def train(args):
     visits = dict(metadata.get('camera_visits', {}))
     balanced = bool(runtime.get('balanced_tiles', not bool(visits)))
     start = int(metadata['iteration'])
-    end = start + args.steps if args.steps is not None else int(opt.iterations)
+    camera_origin = int(runtime.get('camera_schedule_origin', 0))
+    if camera_origin < 0 or camera_origin > start:
+        raise ValueError('Camera schedule origin must precede the current update')
+    image_progress = restore_progress(metadata, info.train_cameras, tile_size, balanced, seed)
+    if image_progress >= opt.iterations:
+        raise ValueError('Image coverage has reached the configured training endpoint')
+    end = start + (args.steps if args.steps is not None else maximum_updates(
+        opt.iterations-image_progress, info.train_cameras, model.resolution, tile_size, balanced))
     if end <= start:
         raise ValueError('Training must advance at least one step')
     schedule = get_expon_lr_func(lr_init=opt.position_lr_init*metadata['spatial_lr_scale'],
@@ -158,11 +169,13 @@ def train(args):
     contract['options'] = options
     sampling = dict(version=1, method='sha256-camera-groups', seed=seed,
         tiles_per_camera=tiles_per_camera, tile_size=tile_size, halo=halo, balanced_tiles=balanced,
+        camera_schedule_origin=camera_origin,
         cameras=hashlib.sha256('\n'.join(str(c.image_name) for c in info.train_cameras).encode('utf-8')).hexdigest())
     previous_sampling = metadata.get('sampling_contract')
     if previous_sampling is not None:
         previous_sampling = dict(previous_sampling)
         previous_sampling.setdefault('balanced_tiles', False)
+        previous_sampling.setdefault('camera_schedule_origin', 0)
     if metadata.get('camera_visits') and previous_sampling is None:
         old_runtime = metadata.get('paged', {})
         for name, value in (('tile_size', tile_size), ('halo', halo), ('tiles_per_camera', tiles_per_camera)):
@@ -174,25 +187,29 @@ def train(args):
     metadata['paged'] = dict(runtime, tile_size=tile_size, halo=halo,
                              tiles_per_camera=tiles_per_camera, balanced_tiles=balanced,
                              resolved_capacity_rows=pool.capacity)
-    lookahead = CameraLookahead(cameras, seed, start, end, tiles_per_camera)
+    lookahead = PagedCameraPrefetch(camera_dataset, seed, start-camera_origin, end-camera_origin, tiles_per_camera,
+        cache_bytes=int(float(runtime.get('image_cache_gib', 2))*2**30),
+        workers=int(runtime.get('decode_workers', 2)))
     log_path = Path(args.output_dir) / 'paged_profile.jsonl'
     started = time.perf_counter()
 
     def save(iteration):
         pool.flush()
         metadata.update(iteration=iteration, camera_visits=visits,
+            image_equivalent_progress=image_progress, progress_clock_version=1,
             rng=torch.get_rng_state(), cuda_rng=torch.cuda.get_rng_state_all(),
             size=sum(b['count'] for b in store.blocks), representation='flat_blocks')
         store.checkpoint(metadata)
 
     print(json.dumps(dict(event='started', iteration=start, end=end, blocks=len(store.blocks),
+                          image_equivalent_progress=image_progress,
                           points=sum(b['count'] for b in store.blocks), capacity_rows=pool.capacity)), flush=True)
     try:
         with log_path.open('a', encoding='utf-8') as log:
             for iteration in range(start+1, end+1):
                 torch.cuda.synchronize()
                 tick = time.perf_counter()
-                camera = lookahead.get(iteration-1)
+                camera = lookahead.get(iteration-1-camera_origin)
                 key = str(camera.image_name)
                 tile = choose_training_tile(camera, visits.get(key, 0), seed, tile_size, halo, balanced=balanced)
                 tile = transfer.ready(transfer.submit(tile, speculative=False))
@@ -222,6 +239,8 @@ def train(args):
                 loss = (1-opt.lambda_dssim)*l1 + opt.lambda_dssim*(1-smap[core].mean())
                 # Equal tile visits with area weights recover a uniform pixel objective.
                 sw, sh = tile.tile_source_size
+                previous_progress = image_progress
+                next_progress = previous_progress + w*h/(sw*sh)
                 area_weight = tile.tile_count*w*h/(sw*sh)
                 objective = loss*area_weight
                 torch.cuda.synchronize()
@@ -238,21 +257,28 @@ def train(args):
                     screen_scores(screen, sw, sh, opt.densify_score_space) / tile.tile_count)
                 torch.cuda.synchronize()
                 after_backward = time.perf_counter()
-                packet.adam_step(raw.grad, parameter_rates(opt, schedule(iteration), 23, 'cuda'), iteration)
+                packet.adam_step(raw.grad, parameter_rates(opt, schedule(next_progress), 23, 'cuda'), iteration)
                 pool.finish_step(packet)
                 visits[key] = visits.get(key, 0)+1
+                image_progress = next_progress
                 torch.cuda.synchronize()
                 after_adam = time.perf_counter()
                 growth = None
-                if opt.densify_from_iter < iteration < opt.densify_until_iter and iteration % opt.densification_interval == 0:
-                    pool.clear()
-                    growth = densify_blocks(store, opt)
-                    pool.refresh_metadata()
-                saved = iteration % checkpoint_every == 0 or iteration == end or growth is not None
+                if crossed_growth(previous_progress, image_progress, opt.densify_from_iter,
+                                  opt.densify_until_iter, opt.densification_interval):
+                    if runtime.get('growth_backend', 'resident') == 'flush':
+                        pool.clear()
+                        growth = densify_blocks(store, opt)
+                        pool.refresh_metadata()
+                    else:
+                        growth = pool.densify(opt)
+                final_step = iteration == end or image_progress >= opt.iterations
+                saved = iteration % checkpoint_every == 0 or final_step or growth is not None
                 if saved:
                     save(iteration)
                 elapsed = time.perf_counter()-tick
-                record = dict(iteration=iteration, loss=float(loss.detach()), tile_steps_per_second=1/elapsed,
+                record = dict(iteration=iteration, image_equivalent_progress=image_progress,
+                    loss=float(loss.detach()), tile_steps_per_second=1/elapsed,
                     core_pixels=w*h, rendered_pixels=tile.image_width*tile.image_height,
                     core_megapixels_per_second=w*h/1e6/elapsed, camera=key, tile=tile.tile_index,
                     visible_points=len(raw), candidate_blocks=len(candidates), total_points=sum(b['count'] for b in store.blocks),
@@ -265,9 +291,12 @@ def train(args):
                 if iteration == start+1 or iteration % 10 == 0 or saved:
                     print(json.dumps(record, allow_nan=False), flush=True)
                 del packet, raw, pkg, image, gt, predicted, smap, loss, objective, tile
+                if final_step:
+                    break
         if args.export_ply:
             store.export_ply(args.export_ply)
-        print(json.dumps(dict(event='completed', iteration=end, elapsed_s=time.perf_counter()-started,
+        print(json.dumps(dict(event='completed', iteration=iteration, image_equivalent_progress=image_progress,
+                              elapsed_s=time.perf_counter()-started,
                               checkpoint=str(store.root/'manifest.json'))), flush=True)
     finally:
         lookahead.close()
@@ -280,7 +309,7 @@ def main():
     parser.add_argument('--output-dir', required=True)
     parser.add_argument('--source-path')
     parser.add_argument('--config')
-    parser.add_argument('--steps', type=int)
+    parser.add_argument('--steps', type=int, help='Maximum optimizer/tile updates for this run; iterations in config counts image coverage')
     parser.add_argument('--export-ply')
     args = parser.parse_args()
     train(args)

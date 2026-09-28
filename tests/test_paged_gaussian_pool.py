@@ -91,3 +91,91 @@ def test_duplicate_requests_do_not_consume_extra_pages(tmp_path):
     packet=pool.acquire([0,0,0])
     assert len(packet.state)==4
     assert list(pool.resident)==[0]
+
+
+def test_growth_keeps_resident_pages_and_matches_flush_clear_reference(tmp_path, monkeypatch):
+    from utils.block_densification import densify_blocks
+    stores = [make_store(tmp_path / name, background=True) for name in ('reference', 'cached')]
+    pools = [PagedGaussianPool(store, 16, device='cpu') for store in stores]
+    for pool in pools:
+        packet = pool.acquire([0, 1, 2])
+        packet.adam_step(torch.full((12,23), .1), torch.full((23,), .001), 20)
+        packet.accumulate_scores(torch.tensor([0,4,5,8]), torch.tensor([9.,1.,2.,3.]))
+    opt = SimpleNamespace(cap_max=100, densify_max_new_nodes=3,
+                          densify_max_leaf_fraction=0, densify_grad_threshold=.5)
+    pools[0].clear()
+    expected = densify_blocks(stores[0], opt)
+    cached = pools[1]
+    pages = dict(cached.resident)
+    sky = cached.state[cached._slice(0)].clone()
+    writes = []
+    real_write = stores[1].write
+    def track(bid, rows, scores=None):
+        writes.append(bid)
+        return real_write(bid, rows, scores)
+    monkeypatch.setattr(stores[1], 'write', track)
+    assert cached.densify(opt) == expected
+    assert dict(cached.resident) == pages
+    assert cached.stats['evictions'] == 0
+    torch.testing.assert_close(cached.state[cached._slice(0)], sky)
+    # Resident pages are changed in place and written only once at checkpoint.
+    assert 1 not in writes and 2 not in writes
+    cached.flush()
+    assert writes.count(1) == writes.count(2) == 1
+    for b in stores[0].blocks:
+        bid = b['id']
+        np.testing.assert_array_equal(stores[1].read(bid), stores[0].read(bid))
+        np.testing.assert_array_equal(stores[1].read_scores(bid), stores[0].read_scores(bid))
+    stores[1].checkpoint()
+    reopened = GaussianBlockStore.open(stores[1].root)
+    assert sum(b['count'] for b in reopened.blocks) == 15
+    cached.acquire([3])  # Newly appended pages are immediately addressable.
+
+
+def test_growth_extends_resident_tail_and_preserves_unmodified_dirty_bounds(tmp_path):
+    from utils.block_densification import densify_blocks
+    stores=[]
+    for name in ('reference','cached'):
+        store=GaussianBlockStore.create(tmp_path/name, {'block_rows':4})
+        for n in (4,1):
+            rows=np.zeros((n,69),dtype=np.float32)
+            rows[:,6]=1
+            rows[:,23:]=7
+            store.append(rows,scores=np.zeros(n,dtype=np.float32))
+        stores.append(store)
+    pools=[PagedGaussianPool(store,12,device='cpu') for store in stores]
+    opt=SimpleNamespace(cap_max=100,densify_max_new_nodes=2,
+                        densify_max_leaf_fraction=0,densify_grad_threshold=.5)
+    for window in range(3):
+        for pool in pools:
+            packet=pool.acquire([0,1])
+            packet.accumulate_scores(torch.tensor([0]),torch.tensor([2.]))
+            pool.finish_step(packet)
+        pools[0].clear()
+        densify_blocks(stores[0],opt)
+        # Reference refresh is what the old trainer did after growth.
+        pools[0].refresh_metadata()
+        page_before=pools[1].resident[1]
+        pools[1].densify(opt)
+        assert pools[1].resident[1]==page_before
+        pools[1].flush()
+        for b in stores[0].blocks:
+            np.testing.assert_array_equal(stores[0].read(b['id']),stores[1].read(b['id']))
+    assert stores[1].blocks[1]['count']==4
+
+
+def test_topology_refresh_retains_live_bounds_and_score_only_writes(tmp_path, monkeypatch):
+    pool=PagedGaussianPool(make_store(tmp_path),12,device='cpu')
+    pool.acquire([0,1])
+    # Simulate an Adam update far beyond the disk AABB with no growth score.
+    pool.state[pool._slice(1),0]=100
+    pool.active.dirty=True
+    pool.finish_step()
+    old_bounds=pool.bounds[1].clone()
+    files=[b['file'] for b in pool.store.blocks]
+    opt=SimpleNamespace(cap_max=12,densify_max_new_nodes=2,
+                        densify_max_leaf_fraction=0,densify_grad_threshold=.5)
+    pool.densify(opt)
+    torch.testing.assert_close(pool.bounds[1],old_bounds)
+    assert files==[b['file'] for b in pool.store.blocks]
+    assert pool.candidate_blocks(SimpleNamespace(full_proj_transform=torch.eye(4)))==[0]

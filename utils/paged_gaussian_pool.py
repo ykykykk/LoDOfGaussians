@@ -55,21 +55,27 @@ class PagedGaussianPool:
         self.resident = OrderedDict()
         self.free = list(reversed(range(self.pages)))
         self.dirty = set()
+        self.score_dirty = set()
         self.active = None
         self._writes = 0
         self.stats = dict(hit_blocks=0, uploaded_rows=0, downloaded_rows=0, evictions=0,
                           requested_blocks=0, uploaded_blocks=0)
         self.refresh_metadata()
 
-    def refresh_metadata(self):
-        if self.resident:
+    def refresh_metadata(self, preserve_resident=False):
+        if self.resident and not preserve_resident:
             raise RuntimeError('Clear cache before refreshing topology')
+        # Dirty page bounds are newer than disk metadata. Keep them across append.
+        previous = {bid: self.bounds[i].clone() for bid, i in self.index.items()} if preserve_resident else {}
         self.metadata = {b['id']: b for b in self.store.blocks}
         self.block_ids = list(self.metadata)
         self.index = {bid: i for i, bid in enumerate(self.block_ids)}
         b = [list(self.metadata[bid]['bounds_min']) + list(self.metadata[bid]['bounds_max']) for bid in self.block_ids]
         self.bounds = torch.tensor(b, dtype=torch.float32, device=self.device).reshape(-1, 6)
         self.background = torch.tensor([bool(self.metadata[bid].get('skybox', False)) for bid in self.block_ids], device=self.device)
+        for bid in self.dirty:
+            if bid in previous:
+                self.bounds[self.index[bid]].copy_(previous[bid])
 
     @staticmethod
     def _planes(camera, device):
@@ -93,14 +99,19 @@ class PagedGaussianPool:
 
     @torch.no_grad()
     def _write(self, bid):
-        if bid not in self.dirty:
+        if bid not in self.dirty and bid not in self.score_dirty:
             return
         s = self._slice(bid)
+        if bid not in self.dirty:
+            self.store.write_scores(bid, self.scores[s].cpu().numpy())
+            self.score_dirty.discard(bid)
+            return
         rows = self.state[s].cpu().numpy()
         scores = self.scores[s].cpu().numpy()
         self.store.write(bid, rows, scores=scores)
         self.stats['downloaded_rows'] += len(rows)
         self.dirty.remove(bid)
+        self.score_dirty.discard(bid)
         self._writes += 1
         if self._writes % 64 == 0:
             self.store.garbage_collect()
@@ -223,8 +234,28 @@ class PagedGaussianPool:
 
     def flush(self):
         self.commit_active()
-        for bid in list(self.dirty):
+        for bid in list(self.dirty | self.score_dirty):
             self._write(bid)
+
+    @torch.no_grad()
+    def densify(self, opt):
+        """Grow from current pages, retaining cache and deferring resident writes.
+
+        As with Adam, flush before checkpointing the underlying store. Failure
+        aborts this training transaction; the published manifest is unchanged.
+        """
+        from utils.block_densification import densify_blocks
+        self.commit_active()
+        # Growth groups child pages spatially; use live bounds for that ordering.
+        dirty_ids = list(self.dirty)
+        if dirty_ids:
+            indices = torch.tensor([self.index[bid] for bid in dirty_ids], device=self.device)
+            bounds = self.bounds.index_select(0, indices).cpu().numpy()
+            for bid, bound in zip(dirty_ids, bounds):
+                self.store.update_bounds(bid, bound[:3], bound[3:])
+        result = densify_blocks(_GrowthStore(self), opt)
+        self.refresh_metadata(preserve_resident=True)
+        return result
 
     def clear(self):
         self.flush()
@@ -233,3 +264,58 @@ class PagedGaussianPool:
         self.refresh_metadata()
 
     invalidate = clear
+
+
+class _GrowthStore:
+    """Block-bounded view of the latest CPU/disk and resident parameter state."""
+    def __init__(self, pool):
+        self.pool = pool
+        self.store = pool.store
+        self.blocks = self.store.blocks
+        self.block_rows = pool.block_rows
+
+    def read(self, bid):
+        if bid in self.pool.resident:
+            rows = self.pool.state[self.pool._slice(bid)].cpu().numpy().copy()
+            self.pool.stats['downloaded_rows'] += len(rows)
+            return rows
+        return self.store.read(bid)
+
+    def read_scores(self, bid):
+        if bid in self.pool.resident:
+            return self.pool.scores[self.pool._slice(bid)].cpu().numpy().copy()
+        return self.store.read_scores(bid)
+
+    def write_scores(self, bid, scores):
+        if bid not in self.pool.resident:
+            return self.store.write_scores(bid, scores)
+        value = np.asarray(scores)
+        if value.shape != (self.blocks[bid]['count'],) or value.dtype != np.float32 or not np.isfinite(value).all():
+            raise ValueError('Expected finite float32 scores [N]')
+        self.pool.scores[self.pool._slice(bid)].copy_(torch.from_numpy(value))
+        self.pool.score_dirty.add(bid)
+
+    def write(self, bid, rows, scores=None):
+        if bid not in self.pool.resident:
+            return self.store.write(bid, rows, scores=scores)
+        value = rows.detach().cpu().numpy() if isinstance(rows, torch.Tensor) else np.asarray(rows)
+        if value.ndim != 2 or value.shape[1] != 69 or not 0 < len(value) <= self.block_rows or value.dtype != np.float32 or not np.isfinite(value).all():
+            raise ValueError('Expected block-bounded finite float32 [N,69] rows')
+        radius = 3 * np.exp(value[:, 3:6].astype(np.float64)).max(axis=1)
+        low = (value[:, :3] - radius[:, None]).min(axis=0)
+        high = (value[:, :3] + radius[:, None]).max(axis=0)
+        self.store.update_bounds(bid, low, high)
+        old_count = self.blocks[bid]['count']
+        self.blocks[bid]['count'] = len(value)
+        s = self.pool._slice(bid)
+        self.pool.state[s].copy_(torch.from_numpy(value))
+        self.pool.stats['uploaded_rows'] += len(value)
+        if scores is not None:
+            self.write_scores(bid, scores)
+        elif old_count != len(value):
+            self.pool.scores[s].zero_()
+        self.pool.bounds[self.pool.index[bid]].copy_(torch.as_tensor(np.concatenate((low, high)), device=self.pool.device))
+        self.pool.dirty.add(bid)
+
+    def append(self, rows, skybox=False, scores=None):
+        return self.store.append(rows, skybox=skybox, scores=scores)
