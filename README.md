@@ -1,4 +1,4 @@
-# Gaussian 单卡训练 — 无 LoD 分支（codex/no-lod）
+# Gaussian 单卡训练 — 无 LoD 分支（yk/no-lod）
 
 本分支使用 `configs/dji_flat_90m.json` 的 `resident.representation="flat"`：只保留实际高斯点和独立背景点，分裂时两个子点替换原点，不保留父高斯及其 Adam 状态。GPU 位置/半径镜像在 Adam 更新后同步，只用于视锥裁剪，不作 LoD 替换或数量截断。
 
@@ -22,7 +22,7 @@
 
 这是基于 [FelixWindisch/LoDOfGaussians](https://github.com/FelixWindisch/LoDOfGaussians) 上游历史维护的个人派生版本，面向 **Windows、单张 NVIDIA GPU、大场景、原尺寸照片和高点数训练**。原论文、算法与官方实现的作者归属属于上游作者；本仓库不是官方发布。
 
-- 个人仓库 / `origin`：[ykykykk/LoDOfGaussians](https://github.com/ykykykk/LoDOfGaussians)，LoD 增强版在 `yk`，本版本在 `codex/no-lod`。
+- 个人仓库 / `origin`：[ykykykk/LoDOfGaussians](https://github.com/ykykykk/LoDOfGaussians)，LoD 增强版在 `yk/lod`，本版本在 `yk/no-lod`。
 - 上游仓库 / `upstream`：[FelixWindisch/LoDOfGaussians](https://github.com/FelixWindisch/LoDOfGaussians)，本地 `main` 跟踪 `upstream/main`。
 - 正式称呼是 **派生仓库 + upstream remote 工作流**。本仓库目前是独立 GitHub 仓库，不是 GitHub Fork 网络内标记的 fork，但保留上游提交历史，仍可通过 Git 获取、比较及合并上游更新。
 - [上游原始 README](#上游原始-readme) 保留在本文后半部分；许可证见 [LICENSE.md](LICENSE.md)，本分支未更换上游许可证。
