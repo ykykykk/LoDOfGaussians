@@ -1,8 +1,28 @@
-# A LoD of Gaussians — Windows 单卡增强分支（yk）
+# Gaussian 单卡训练 — 无 LoD 分支（codex/no-lod）
+
+本分支使用 `configs/dji_flat_90m.json` 的 `resident.representation="flat"`：只保留实际高斯点和独立背景点，分裂时两个子点替换原点，不保留父高斯及其 Adam 状态。GPU 位置/半径镜像在 Adam 更新后同步，只用于视锥裁剪，不作 LoD 替换或数量截断。
+
+从已有 SH1 Resident v2 检查点迁移，原文件保持不变：
+
+```powershell
+.venv/Scripts/python.exe tools/flat_checkpoint.py migrate --input OLD/resident_latest.pt --output NEW/flat_initial.pt --config configs/dji_flat_90m.json
+```
+
+使用相同数据、分辨率及源断点对应的 scaffold/数据清单，按原入口传入 flat 配置和 `--skip_if_exists --resume_checkpoint NEW/flat_initial.pt`。迁移保留叶子参数、Adam、步数和 RNG，重新开始增点评分窗口；两种表示的断点禁止隐式混用。
+
+配置中 `cap_max=90000000` 是实际存储点数上限（含背景），`densify_max_new_nodes=600000` 是每窗口**净增**点数，对应旧模式新增 120 万节点后净增 60 万叶子的强度。上限不保证达到，梯度与增点截止步决定最终数量。
+
+最终保存 `resident_latest.pt`；`--export_ply` 导出无父层 PLY，不生成 `.dhier`。中途停止后可用：
+
+```powershell
+.venv/Scripts/python.exe tools/flat_checkpoint.py export --input NEW/resident_latest.pt --output NEW/scene.ply
+```
+
+当前支持已有 SH1 检查点迁移；新数据仍需原流程产生初始模型后迁移，没有新增无 scaffold 的从零入口。空间裁剪采用分块逐点扫描，单视角可见点过多仍可能超过显存；SSD/虚拟内存不能消除渲染显存限制。这里没有用降分辨率或丢弃可见点规避这一限制。
 
 这是基于 [FelixWindisch/LoDOfGaussians](https://github.com/FelixWindisch/LoDOfGaussians) 上游历史维护的个人派生版本，面向 **Windows、单张 NVIDIA GPU、大场景、原尺寸照片和高点数训练**。原论文、算法与官方实现的作者归属属于上游作者；本仓库不是官方发布。
 
-- 个人仓库 / `origin`：[ykykykk/LoDOfGaussians](https://github.com/ykykykk/LoDOfGaussians)，修改发布在 `yk` 分支。
+- 个人仓库 / `origin`：[ykykykk/LoDOfGaussians](https://github.com/ykykykk/LoDOfGaussians)，LoD 增强版在 `yk`，本版本在 `codex/no-lod`。
 - 上游仓库 / `upstream`：[FelixWindisch/LoDOfGaussians](https://github.com/FelixWindisch/LoDOfGaussians)，本地 `main` 跟踪 `upstream/main`。
 - 正式称呼是 **派生仓库 + upstream remote 工作流**。本仓库目前是独立 GitHub 仓库，不是 GitHub Fork 网络内标记的 fork，但保留上游提交历史，仍可通过 Git 获取、比较及合并上游更新。
 - [上游原始 README](#上游原始-readme) 保留在本文后半部分；许可证见 [LICENSE.md](LICENSE.md)，本分支未更换上游许可证。
@@ -408,4 +428,3 @@ python hierarchy_viewer.py --hierarchy /path/to/result.dhier -s root/  --config 
 
 ### Disclaimer
 Note that this code release version relies on the gsplat rasterizer and will thus be more memory-efficient than reported in the paper.
-

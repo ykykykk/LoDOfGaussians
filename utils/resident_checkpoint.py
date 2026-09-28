@@ -35,7 +35,7 @@ def save_checkpoint(path, g, iteration, contract, seed, tracker, ema, empty_wind
 def _growth_contract_matches(old, new, iteration):
     if not isinstance(old, dict) or not isinstance(new, dict):
         return False
-    if any(old.get(key) != new.get(key) for key in ('source', 'resolution', 'hierarchy', 'pipeline')):
+    if any(old.get(key) != new.get(key) for key in ('source', 'resolution', 'hierarchy', 'pipeline', 'representation')):
         return False
     a, b = old.get('options', {}), new.get('options', {})
     if not isinstance(a, dict) or not isinstance(b, dict):

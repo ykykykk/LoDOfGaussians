@@ -1,8 +1,4 @@
-"""Resident v2: incremental SPT, next-view streaming and indexed CUDA ops.
-
-The FP32 reference, native and prefetch paths use the same view schedule and
-classic detail threshold. No extra radius/opacity culling or LoD reduction.
-"""
+"""Resident v2: cached Gaussian training with LoD or explicit flat point storage."""
 from dataclasses import asdict, dataclass
 import json
 import math
@@ -46,8 +42,13 @@ class ResidentOptions:
     host_storage: str = 'ram'
     host_directory: str = ''
     max_active_nodes: int = 0
+    representation: str = "lod"
 
     def __post_init__(self):
+        if self.representation not in ('lod', 'flat'):
+            raise ValueError('representation must be lod or flat')
+        if self.representation == 'flat' and self.max_active_nodes:
+            raise ValueError('Flat training cannot use a LoD active-node budget; set max_active_nodes=0')
         if self.host_storage not in ('ram', 'mmap'):
             raise ValueError('host_storage must be ram or mmap')
         if self.host_storage == 'mmap' and not self.host_directory:
@@ -64,6 +65,8 @@ class ResidentOptions:
 
 def validate_options(opt, runtime=None):
     settings = ResidentOptions(**(runtime or {}))
+    if settings.representation == "flat" and opt.SH_degree != 1:
+        raise ValueError("Flat migration currently supports SH degree 1 checkpoints")
     if opt.storage_device != "cpu" or opt.densification != "classic":
         raise ValueError("resident v2 requires classic densification and CPU backing")
     if opt.prune_unused or opt.dampen_scale_grad or opt.optimize_exposure or opt.use_occlusion_culling:
@@ -167,8 +170,12 @@ def training(dataset, opt, pipe, saving_iterations, view_graph=None, runtime=Non
     contract = (dict(source=str(Path(dataset.source_path).resolve()), resolution=dataset.resolution,
                     hierarchy=str(Path(dataset.hierarchy).resolve()), options=vars(opt), pipeline=vars(pipe))
                 if settings.checkpoint_every or resume_checkpoint else {})
+    if settings.representation == 'flat':
+        contract['representation'] = 'flat'
     restored = load_checkpoint(resume_checkpoint, g, contract, opt.iterations,
                                allow_growth=allow_growth_resume) if resume_checkpoint else None
+    if settings.representation == 'flat' and not restored:
+        raise ValueError('Flat mode requires an explicitly migrated flat checkpoint')
     first_iteration = restored['iteration'] + 1 if restored else 0
     cameras = scene.getTrainCameras()
     if not len(cameras):
@@ -179,8 +186,12 @@ def training(dataset, opt, pipe, saving_iterations, view_graph=None, runtime=Non
     root_volume = relative_spt_volume(opt, g.spatial_lr_scale)
     if base_focal <= 0:
         raise ValueError('camera focal length must be positive')
-    builder = IncrementalSPT(root_volume, opt.target_granularity_pixels / base_focal,
-                             opt.min_SPT_size, opt.use_bounding_spheres)
+    if settings.representation == 'flat':
+        from utils.flat_gaussians import FlatSelector
+        builder = FlatSelector(use_frustum_culling=opt.use_frustum_culling)
+    else:
+        builder = IncrementalSPT(root_volume, opt.target_granularity_pixels / base_focal,
+                                 opt.min_SPT_size, opt.use_bounding_spheres)
     builder.refresh(g)
     native = load_native(settings.native_ops)
     width = g.properties.shape[1] // 3
@@ -223,7 +234,7 @@ def training(dataset, opt, pipe, saving_iterations, view_graph=None, runtime=Non
         iterations=opt.iterations, seed=seed, optimization=vars(opt),
         scene_radius=g.spatial_lr_scale, spt_root_volume=root_volume, lod_base_focal=base_focal,
         host_backing=str(backing.path) if backing else None), indent=2), encoding='utf-8')
-    print(f'Resident v2: {capacity:,} slots; native={native is not None}; incremental_spt={settings.incremental_spt}')
+    print(f'Resident v2: {pool.capacity:,} slots; native={native is not None}; representation={settings.representation}')
     progress = tqdm(total=opt.iterations+1, initial=first_iteration, desc='Resident v2 fine training')
     ticket = None
     tracker = DetailWindow(opt.cap_max, pool.device) if getattr(opt, 'detail_diagnostics', False) else None
@@ -242,6 +253,9 @@ def training(dataset, opt, pipe, saving_iterations, view_graph=None, runtime=Non
         del restored
 
     def select(ticket, iteration):
+        if settings.representation == 'flat':
+            ticket.selected_multiplier = 1.0
+            return builder.select(g, transfer.metadata(ticket))
         if ticket.multiplier is None:
             focal = effective_focal(ticket.cpu) if pixel_lod else ticket.cpu.focal_length
             ticket.multiplier = base_focal / focal
@@ -287,7 +301,7 @@ def training(dataset, opt, pipe, saving_iterations, view_graph=None, runtime=Non
                     next_cpu = views.pop(block=False)
                     if next_cpu is not None:
                         next_ticket = transfer.submit(next_cpu, speculative=True)
-                        if not split and settings.gaussian_prefetch_rows:
+                        if not split and settings.gaussian_prefetch_rows and settings.representation != 'flat':
                             next_ids = select(next_ticket, iteration+1)
                             pool.prefetch(next_ids, epoch=pool.epoch)
             if iteration > 0 and iteration % max(1, int(opt.iterations * opt.SH_increase_after_train_percent)) == 0:
@@ -303,7 +317,11 @@ def training(dataset, opt, pipe, saving_iterations, view_graph=None, runtime=Non
                 with profile.phase('save'):
                     pool.flush()
                     filename = opt.output_file_name if iteration == opt.iterations else f'iteration_{iteration}'
-                    g.save_hierarchy(str(output), file_name=filename)
+                    if settings.representation == 'flat':
+                        save_checkpoint(output / 'resident_latest.pt', g, iteration, contract,
+                                        seed, tracker, ema, empty_windows)
+                    else:
+                        g.save_hierarchy(str(output), file_name=filename)
             if iteration < opt.iterations and split:
                 with profile.phase('densify_rebuild'):
                     pool.flush()
@@ -316,20 +334,24 @@ def training(dataset, opt, pipe, saving_iterations, view_graph=None, runtime=Non
                     if getattr(opt, 'densify_max_new_nodes', 0) > 0:
                         needed = old_size + min(opt.densify_max_new_nodes, opt.cap_max - old_size)
                         _grow_cpu_backing(g, pool, needed, opt.cap_max)
-                    g.add_new_gs(cap_max=opt.cap_max, size=g.size, densification='classic',
-                                 densify_percent=opt.densify_percent, densify_threshold=opt.densify_grad_threshold,
-                                 max_leaf_fraction=getattr(opt, 'densify_max_leaf_fraction', 0.),
-                                 max_new_nodes=getattr(opt, 'densify_max_new_nodes', 0))
-                    mask = torch.zeros(g.size, dtype=torch.bool)
-                    mask[:old_size] = dead
-                    mask &= g.nodes[:g.size, 2] == 0
-                    g.relocate_gs(mask, g.size, storage_device='cpu', densification='classic')
-                    if not settings.incremental_spt:
-                        builder.cache.clear()  # full-refresh A/B, identical construction rules
+                    if settings.representation == 'flat':
+                        from utils.flat_gaussians import split_flat
+                        split_flat(g, opt)
+                    else:
+                        g.add_new_gs(cap_max=opt.cap_max, size=g.size, densification='classic',
+                                     densify_percent=opt.densify_percent, densify_threshold=opt.densify_grad_threshold,
+                                     max_leaf_fraction=getattr(opt, 'densify_max_leaf_fraction', 0.),
+                                     max_new_nodes=getattr(opt, 'densify_max_new_nodes', 0))
+                        mask = torch.zeros(g.size, dtype=torch.bool)
+                        mask[:old_size] = dead
+                        mask &= g.nodes[:g.size, 2] == 0
+                        g.relocate_gs(mask, g.size, storage_device='cpu', densification='classic')
+                        if not settings.incremental_spt:
+                            builder.cache.clear()  # full-refresh A/B, identical construction rules
                     builder.refresh(g)
                     pool.reset_scores(g.size)
                     if tracker is not None:
-                        detail.update(new_nodes=g.size-old_size, split_parents=(g.size-old_size)//2,
+                        detail.update(new_nodes=g.size-old_size, split_parents=(g.size-old_size) if settings.representation == 'flat' else (g.size-old_size)//2,
                             leaf_nodes_after=int((g.nodes[:g.size,2] == 0).sum()),
                             score_space=getattr(opt, 'densify_score_space', 'pixel'))
                         detail_file.write(json.dumps(detail) + chr(10))
@@ -356,6 +378,8 @@ def training(dataset, opt, pipe, saving_iterations, view_graph=None, runtime=Non
                             packet, grad, rates, iteration, frozen_prefix=g.skybox_points))
                         if not replayed:
                             packet.adam_step(grad, rates, iteration, frozen_prefix=g.skybox_points)
+                        if settings.representation == 'flat':
+                            builder.update(packet.ids, packet.state)
                 del packet, grad
             ticket = next_ticket
             if settings.checkpoint_every and iteration > 0 and iteration < opt.iterations and iteration % settings.checkpoint_every == 0:

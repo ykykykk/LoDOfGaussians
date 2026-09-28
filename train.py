@@ -199,6 +199,10 @@ if __name__ == '__main__':
         **training_kwargs)
 
     if args.export_ply:
-        from tools.export_ply import export_hierarchy_ply
-        export_hierarchy_ply(Path(output_dir) / optimization_params.output_file_name, Path(args.export_ply))
+        if training_kwargs.get('runtime', {}).get('representation') == 'flat':
+            from tools.flat_checkpoint import export_checkpoint
+            export_checkpoint(Path(output_dir) / 'resident_latest.pt', Path(args.export_ply))
+        else:
+            from tools.export_ply import export_hierarchy_ply
+            export_hierarchy_ply(Path(output_dir) / optimization_params.output_file_name, Path(args.export_ply))
     print(f"Training finished in {time.time() - start_time:.2f} seconds.")
