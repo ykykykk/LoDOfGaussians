@@ -137,7 +137,6 @@ def train(args):
     usable_bytes = min(float(runtime.get('pool_gib', 8))*2**30,
                        free_bytes - float(runtime.get('headroom_gib', 6))*2**30)
     capacity = int(runtime.get('capacity_rows', max(0, usable_bytes) // 280))
-    capacity = min(capacity, len(store.blocks)*store.block_rows)
     pool = PagedGaussianPool(store, capacity, native)
     seed = int(metadata.get('seed', 0))
     if metadata.get('rng') is not None:
@@ -173,7 +172,8 @@ def train(args):
         raise ValueError('Sampling configuration differs from the checkpoint; preserve tile_size, halo, tiles_per_camera and camera order')
     metadata['sampling_contract'] = sampling
     metadata['paged'] = dict(runtime, tile_size=tile_size, halo=halo,
-                             tiles_per_camera=tiles_per_camera, balanced_tiles=balanced, capacity_rows=pool.capacity)
+                             tiles_per_camera=tiles_per_camera, balanced_tiles=balanced,
+                             resolved_capacity_rows=pool.capacity)
     lookahead = CameraLookahead(cameras, seed, start, end, tiles_per_camera)
     log_path = Path(args.output_dir) / 'paged_profile.jsonl'
     started = time.perf_counter()
