@@ -1,0 +1,16 @@
+{
+  "options": {
+    "cap_max": 100000000,
+    "densify_max_new_nodes": 600000
+  },
+  "paged": {
+    "tile_size": 2048,
+    "balanced_tiles": true,
+    "halo": 8,
+    "tiles_per_camera": 4,
+    "pool_gib": 8,
+    "headroom_gib": 6,
+    "image_cache_gib": 2,
+    "checkpoint_every": 1000
+  }
+}

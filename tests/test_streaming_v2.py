@@ -602,11 +602,12 @@ def test_v2_real_training_control_flow_prefetch_matches_reference(tmp_path, monk
     monkeypatch.setattr(tr, 'load_native', lambda mode:None)
     # Vary the selected leaf subset by camera, and let the real builder's epoch
     # force an updated selection after every split.
-    def select(g, cam, *a, **k):
+    def select(g, cam, opt, multiplier, native=None, max_active_nodes=0):
+        assert max_active_nodes == 0  # This fixture tests exact, unbudgeted leaf selection.
         leaves = torch.where(g.nodes[:g.size, 2] == 0)[0]
         i = int(cam.image_name)
-        return leaves[i::4].to(torch.int32)
-    monkeypatch.setattr(tr, 'select_gaussians', select)
+        return leaves[i::4].to(torch.int32), multiplier
+    monkeypatch.setattr(tr, 'select_with_budget', select)
     real_tensor = torch.tensor
     def tensor(*a, **k):
         if k.get('device') == 'cuda':

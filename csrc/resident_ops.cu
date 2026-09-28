@@ -208,3 +208,98 @@ void update_bounds_cuda(torch::Tensor bounds, torch::Tensor ids, torch::Tensor r
         C10_CUDA_KERNEL_LAUNCH_CHECK();
     }
 }
+
+__global__ void paged_visible_kernel(const float* state, const int64_t* counts,
+    const bool* requested, const bool* sky, int64_t block_rows, const float* planes,
+    bool* mask, int64_t n) {
+    const int64_t i = int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const int64_t page = i / block_rows;
+    if (!requested[page] || i % block_rows >= counts[page]) { mask[i] = false; return; }
+    if (sky[page]) { mask[i] = true; return; }
+    const float* r = state + i * 69;
+    const float largest = (isnan(r[3]) || isnan(r[4]) || isnan(r[5]))
+        ? nanf("") : fmaxf(r[3], fmaxf(r[4], r[5]));
+    const float radius = 3.f * expf(largest);
+    bool keep = true;
+    for (int p = 0; p < 4; ++p) {
+        const float d = r[0]*planes[p*4] + r[1]*planes[p*4+1]
+                      + r[2]*planes[p*4+2] + planes[p*4+3];
+        keep = keep && (d + radius >= 0.f);
+    }
+    mask[i] = keep;
+}
+
+__global__ void recompute_page_bounds_kernel(const float* state, const int64_t* counts,
+    const int64_t* mapping, const bool* requested, int64_t block_rows, float* bounds, int64_t blocks) {
+    const int64_t page = blockIdx.x, bid = mapping[page];
+    if (!requested[page] || bid < 0 || bid >= blocks || counts[page] <= 0) return;
+    __shared__ float work[6][256];
+    float lo[3] = {INFINITY, INFINITY, INFINITY};
+    float hi[3] = {-INFINITY, -INFINITY, -INFINITY};
+    for (int64_t row=threadIdx.x; row<counts[page] && row<block_rows; row+=blockDim.x) {
+        const float* r=state+(page*block_rows+row)*69;
+        const float radius=3.f*expf(fmaxf(r[3],fmaxf(r[4],r[5])));
+        for(int axis=0;axis<3;++axis) {
+            lo[axis]=fminf(lo[axis],r[axis]-radius);
+            hi[axis]=fmaxf(hi[axis],r[axis]+radius);
+        }
+    }
+    for(int axis=0;axis<3;++axis) {
+        work[axis][threadIdx.x]=lo[axis];
+        work[axis+3][threadIdx.x]=hi[axis];
+    }
+    __syncthreads();
+    for(int stride=128;stride>0;stride/=2) {
+        if(threadIdx.x<stride) for(int axis=0;axis<3;++axis) {
+            work[axis][threadIdx.x]=fminf(work[axis][threadIdx.x],work[axis][threadIdx.x+stride]);
+            work[axis+3][threadIdx.x]=fmaxf(work[axis+3][threadIdx.x],work[axis+3][threadIdx.x+stride]);
+        }
+        __syncthreads();
+    }
+    if(threadIdx.x==0) for(int axis=0;axis<6;++axis) bounds[bid*6+axis]=work[axis][0];
+}
+
+torch::Tensor paged_visible_cuda(torch::Tensor state, torch::Tensor counts, torch::Tensor requested,
+    torch::Tensor sky, int64_t block_rows, torch::Tensor planes) {
+    CUDA_CONTIG(state); CUDA_CONTIG(counts); CUDA_CONTIG(requested); CUDA_CONTIG(sky);
+    CUDA_CONTIG(planes); FP32(state); FP32(planes);
+    TORCH_CHECK(state.dim()==2 && state.size(1)==69 && block_rows>0 && state.size(0)%block_rows==0, "invalid paged state");
+    const int64_t pages=state.size(0)/block_rows;
+    TORCH_CHECK(counts.dim()==1 && counts.numel()==pages && counts.scalar_type()==torch::kInt64, "invalid page counts");
+    TORCH_CHECK(requested.dim()==1 && requested.numel()==pages && requested.scalar_type()==torch::kBool, "invalid requested pages");
+    TORCH_CHECK(sky.dim()==1 && sky.numel()==pages && sky.scalar_type()==torch::kBool, "invalid sky pages");
+    TORCH_CHECK(planes.dim()==2 && planes.size(0)==4 && planes.size(1)==4, "planes must be [4,4]");
+    TORCH_CHECK(counts.device()==state.device() && requested.device()==state.device()
+        && sky.device()==state.device() && planes.device()==state.device(), "device mismatch");
+    c10::cuda::CUDAGuard guard(state.device());
+    auto result=torch::empty({state.size(0)},state.options().dtype(torch::kBool));
+    if (state.size(0)) {
+        paged_visible_kernel<<<(state.size(0)+255)/256,256,0,at::cuda::getCurrentCUDAStream()>>>(
+            state.data_ptr<float>(),counts.data_ptr<int64_t>(),requested.data_ptr<bool>(),sky.data_ptr<bool>(),
+            block_rows,planes.data_ptr<float>(),result.data_ptr<bool>(),state.size(0));
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
+    }
+    return result;
+}
+
+void recompute_page_bounds_cuda(torch::Tensor state, torch::Tensor counts, torch::Tensor mapping,
+    torch::Tensor requested, int64_t block_rows, torch::Tensor bounds) {
+    CUDA_CONTIG(state); CUDA_CONTIG(counts); CUDA_CONTIG(mapping); CUDA_CONTIG(requested); CUDA_CONTIG(bounds);
+    FP32(state); FP32(bounds);
+    TORCH_CHECK(state.dim()==2 && state.size(1)==69 && block_rows>0 && state.size(0)%block_rows==0, "invalid paged state");
+    const int64_t pages=state.size(0)/block_rows;
+    TORCH_CHECK(counts.dim()==1 && counts.numel()==pages && counts.scalar_type()==torch::kInt64, "invalid page counts");
+    TORCH_CHECK(mapping.dim()==1 && mapping.numel()==pages && mapping.scalar_type()==torch::kInt64, "invalid page mapping");
+    TORCH_CHECK(requested.dim()==1 && requested.numel()==pages && requested.scalar_type()==torch::kBool, "invalid requested pages");
+    TORCH_CHECK(bounds.dim()==2 && bounds.size(1)==6, "invalid page bounds");
+    TORCH_CHECK(counts.device()==state.device() && mapping.device()==state.device()
+        && requested.device()==state.device() && bounds.device()==state.device(), "device mismatch");
+    c10::cuda::CUDAGuard guard(state.device());
+    if(pages) {
+        recompute_page_bounds_kernel<<<pages,256,0,at::cuda::getCurrentCUDAStream()>>>(
+            state.data_ptr<float>(),counts.data_ptr<int64_t>(),mapping.data_ptr<int64_t>(),requested.data_ptr<bool>(),
+            block_rows,bounds.data_ptr<float>(),bounds.size(0));
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
+    }
+}

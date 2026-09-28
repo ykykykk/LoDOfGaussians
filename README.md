@@ -22,6 +22,23 @@
 
 当前支持已有 SH1 检查点迁移；新数据仍需原流程产生初始模型后迁移，没有新增无 scaffold 的从零入口。空间裁剪采用分块逐点扫描，单视角可见点过多仍可能超过显存；SSD/虚拟内存不能消除渲染显存限制。这里没有用降分辨率或丢弃可见点规避这一限制。
 
+## SSD 空间块训练（可选大模型后端）
+
+`train_paged.py` 将全局参数和 Adam 放在独立磁盘块中，GPU 只保留固定预算页缓存和块元数据。转换时按高斯支撑半径分组、组内空间排序，避免少量大高斯扩大所有块的边界。训练按原像素裁块，保留 SSIM halo，使用融合 CUDA 页裁剪、索引 Adam 和页包围盒归约；不会生成 LoD 父点。
+
+```powershell
+.venv/Scripts/python.exe tools/convert_block_checkpoint.py --input OLD/resident_latest.pt --output NEW/initial
+.venv/Scripts/python.exe train_paged.py --checkpoint NEW/initial --output-dir NEW/run01 --config configs/dji_flat_blocks.json --steps 100
+.venv/Scripts/python.exe train_paged.py --checkpoint NEW/run01 --output-dir NEW/run02 --steps 100
+.venv/Scripts/python.exe tools/export_block_ply.py --checkpoint NEW/run02
+```
+
+输入必须为已迁移的 SH1 flat 断点。每次训练派生独立输出目录，保留源断点；新格式使用 `manifest.json`，不能传给旧 `--resume_checkpoint`。同盘文件以硬链接复用，不可变块写新版本；原子提交保留当前与上一代，导出 PLY 默认排除背景。
+
+配置继承断点的训练选项，包括增点截止步；仅提高上限不会重新开启已结束的分裂。`pool_gib` 默认 8 GiB，另留 6 GiB 渲染空间；显式 `capacity_rows` 可覆盖。超出单裁块缓存容量会报告所需容量，不能靠删除可见点继续。断点恢复会校验裁块采样参数，保持每个相机的覆盖进度。
+
+这里的步数是**裁块优化步**，2048 上限对 DJI 原图形成 15 个面积近似相等的裁块。每步处理像素比整图少，不能直接比较两者步/秒，也不能照搬整图训练的剩余步数来宣称相同收敛质量。当前约 2000 万点仍优先使用上面的全显存快路径；分页后端用于突破总模型驻留限制，尚未替代默认入口。测试、实施计划及容量边界见 [空间块实施记录](Docs/NoLoD_Spatial_Plan.md)。
+
 这是基于 [FelixWindisch/LoDOfGaussians](https://github.com/FelixWindisch/LoDOfGaussians) 上游历史维护的个人派生版本，面向 **Windows、单张 NVIDIA GPU、大场景、原尺寸照片和高点数训练**。原论文、算法与官方实现的作者归属属于上游作者；本仓库不是官方发布。
 
 - 个人仓库 / `origin`：[ykykykk/LoDOfGaussians](https://github.com/ykykykk/LoDOfGaussians)，LoD 增强版在 `yk/lod`，本版本在 `yk/no-lod`。
@@ -53,12 +70,12 @@
 需要 Git、PowerShell 7、`uv`、NVIDIA 驱动、CUDA Toolkit 12.6（`nvcc` 可用）、Visual Studio C++ 构建工具，以及 CMake/Ninja。项目使用 Python 3.10，本机训练使用 MSVC 14.44。安装脚本会安装依赖并编译扩展；依赖没有全部锁定，首次编译可能耗时较长。
 
 ```powershell
-git clone --recursive --branch yk https://github.com/ykykykk/LoDOfGaussians.git
+git clone --recursive --branch yk/no-lod https://github.com/ykykykk/LoDOfGaussians.git
 cd LoDOfGaussians
 git remote add upstream https://github.com/FelixWindisch/LoDOfGaussians.git
 git fetch upstream
 git config remote.pushDefault origin
-git config branch.yk.pushRemote origin
+git config branch.yk/no-lod.pushRemote origin
 & .\scripts\setup_windows.ps1
 ```
 
