@@ -1,0 +1,7 @@
+{
+  "target_fps": 30,
+  "idle_fps": 2,
+  "interaction_width": 640,
+  "snapshot_points": 0,
+  "snapshot_interval_s": 1.0
+}

@@ -33,6 +33,7 @@ if __name__ == '__main__':
     parser.add_argument('--resident_version', type=int, choices=(1, 2), default=None,
                         help="Resident runtime version; overrides JSON resident_version (default: 2).")
     parser.add_argument('--seed', type=int, default=None, help="Optional RNG seed for controlled A/B runs.")
+    parser.add_argument('--scaffold_checkpoint', default='', help='Resume a saved scaffold optimizer checkpoint.')
     parser.add_argument('--resume_checkpoint', default='', help='Resident v2 full-state checkpoint; also use --skip_if_exists.')
     parser.add_argument('--allow_growth_resume', action='store_true',
                         help='Allow only a larger resident-v2 node budget and extended split schedule when resuming.')
@@ -117,10 +118,14 @@ if __name__ == '__main__':
             runtime = {key: value for key, value in runtime.items() if key in allowed}
         else:
             raise ValueError("resident_version must be 1 or 2")
+        if version == 2:
+            training_kwargs["viewer_config"] = data.get("viewer")
         validate_options(optimization_params, runtime)
         training_kwargs["runtime"] = runtime
         print(f"Resident runtime version: {version}")
     print(f"Fine training backend: {training_backend}")
+    if args.skip_if_exists and not args.resume_checkpoint and (Path(output_dir) / 'resident_latest.pt').is_file():
+        args.resume_checkpoint = str(Path(output_dir) / 'resident_latest.pt')
     if args.resume_checkpoint:
         if training_backend != 'resident' or version != 2 or not args.skip_if_exists:
             raise ValueError('Resume requires resident v2 and --skip_if_exists')
@@ -153,7 +158,11 @@ if __name__ == '__main__':
             train_scaffold.training(
                 model_params, optimization_params, pipeline_params,
                 saving_iterations=[optimization_params.coarse_iterations],
-                checkpoint_iterations=[], checkpoint=False, debug_from=-1)
+                checkpoint_iterations=[], checkpoint=(args.scaffold_checkpoint or
+                    (str(Path(output_dir) / 'scaffold' / 'scaffold_latest.pt')
+                     if (Path(output_dir) / 'scaffold' / 'scaffold_latest.pt').is_file() else None)), debug_from=-1,
+                viewer_config=data.get("viewer"), checkpoint_every=int(data.get('coarse_checkpoint_every',
+                    (data.get('resident') or {}).get('checkpoint_every', 500)) or 500))
         except subprocess.CalledProcessError as e:
             print(f"Error executing train_coarse: {e}")
             sys.exit(1)

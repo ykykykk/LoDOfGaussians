@@ -3,7 +3,7 @@
 # GRAPHDECO research group, https://team.inria.fr/graphdeco
 # All rights reserved.
 #
-# This software is free for non-commercial, research and evaluation use 
+# This software is free for non-commercial, research and evaluation use
 # under the terms of the LICENSE.md file.
 #
 # For inquiries contact  george.drettakis@inria.fr
@@ -28,7 +28,7 @@ import torchvision
 def direct_collate(x):
     return x
 
-def training(dataset, opt, pipe, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
+def training(dataset, opt, pipe, saving_iterations, checkpoint_iterations, checkpoint, debug_from, viewer_config=None, checkpoint_every=500):
     first_iter = 0
     prepare_output_and_logger(dataset)
     print("coarse source path: " + dataset.source_path)
@@ -38,8 +38,22 @@ def training(dataset, opt, pipe, saving_iterations, checkpoint_iterations, check
         gaussians._opacity[:] = -3
     gaussians.training_setup(opt)
     if checkpoint:
-        (model_params, first_iter) = torch.load(checkpoint)
+        saved = torch.load(checkpoint, weights_only=False)
+        model_params, first_iter = (saved['model'], saved['iteration']) if isinstance(saved, dict) else saved
+        if isinstance(saved, dict):
+            gaussians._exposure = torch.nn.Parameter(saved['exposure'].cuda().requires_grad_(True))
+            gaussians.exposure_mapping = saved['exposure_mapping']
+            gaussians.skybox_points = saved['skybox_points']
         gaussians.restore(model_params, opt)
+        if isinstance(saved, dict):
+            gaussians.exposure_optimizer.load_state_dict(saved['exposure_optimizer'])
+            torch.set_rng_state(saved['rng'].cpu())
+            torch.cuda.set_rng_state_all([state.cpu() for state in saved['cuda_rng']])
+        print(f'Resumed scaffold checkpoint after iteration {first_iter}', flush=True)
+
+    if first_iter >= opt.coarse_iterations:
+        scene.save(opt.coarse_iterations)
+        return
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
@@ -58,130 +72,146 @@ def training(dataset, opt, pipe, saving_iterations, checkpoint_iterations, check
     iteration = first_iter
     training_generator = make_camera_loader(scene.getTrainCameras(), opt, shuffle=True)
 
-    
+
     for param_group in gaussians.optimizer.param_groups:
         if param_group["name"] == "xyz":
             param_group['lr'] = 0.0
-            
-    while iteration < opt.coarse_iterations + 1:
-        for viewpoint_batch in training_generator:
-            for viewpoint_cam in viewpoint_batch:
-                #viewpoint_cam = scene.getTrainCameras()[first_images[iteration-1]]
-                background = torch.rand((3), dtype=torch.float32, device="cuda")
-                viewpoint_cam.world_view_transform = viewpoint_cam.world_view_transform.cuda(non_blocking=True)
-                viewpoint_cam.projection_matrix = viewpoint_cam.projection_matrix.cuda(non_blocking=True)
-                viewpoint_cam.full_proj_transform = viewpoint_cam.full_proj_transform.cuda(non_blocking=True)
-                viewpoint_cam.camera_center = viewpoint_cam.camera_center.cuda(non_blocking=True)
 
-                if network_gui.conn == None:
-                    network_gui.try_connect()
-                while network_gui.conn != None:
-                    try:
-                        net_image_bytes = None
-                        custom_cam, do_training, pipe.convert_SHs_python, pipe.compute_cov3D_python, keep_alive, scaling_modifer = network_gui.receive()
-                        print(scaling_modifer)
-                        if custom_cam != None:
-                            net_image = render_gsplat(custom_cam, gaussians, pipe, background, scaling_modifer, indices = indices)["render"]
-                            net_image_bytes = memoryview((torch.clamp(net_image, min=0, max=1.0) * 255).byte().permute(1, 2, 0).contiguous().cpu().numpy())
-                        network_gui.send(net_image_bytes, dataset.source_path)
-                        if do_training and ((iteration < int(opt.coarse_iterations)) or not keep_alive):
-                            break
-                    except Exception as e:
-                        network_gui.conn = None
+    from utils.initial_viewer import start_initial_viewer
+    viewer = None
+    try:
+        viewer = start_initial_viewer(viewer_config, gaussians, pipe, background)
+        while iteration < opt.coarse_iterations + 1:
+            for viewpoint_batch in training_generator:
+                for viewpoint_cam in viewpoint_batch:
+                    #viewpoint_cam = scene.getTrainCameras()[first_images[iteration-1]]
+                    background = torch.rand((3), dtype=torch.float32, device="cuda")
+                    viewpoint_cam.world_view_transform = viewpoint_cam.world_view_transform.cuda(non_blocking=True)
+                    viewpoint_cam.projection_matrix = viewpoint_cam.projection_matrix.cuda(non_blocking=True)
+                    viewpoint_cam.full_proj_transform = viewpoint_cam.full_proj_transform.cuda(non_blocking=True)
+                    viewpoint_cam.camera_center = viewpoint_cam.camera_center.cuda(non_blocking=True)
 
-                iter_start.record()
+                    if network_gui.conn == None:
+                        network_gui.try_connect()
+                    while network_gui.conn != None:
+                        try:
+                            net_image_bytes = None
+                            custom_cam, do_training, pipe.convert_SHs_python, pipe.compute_cov3D_python, keep_alive, scaling_modifer = network_gui.receive()
+                            print(scaling_modifer)
+                            if custom_cam != None:
+                                net_image = render_gsplat(custom_cam, gaussians, pipe, background, scaling_modifer, indices = indices)["render"]
+                                net_image_bytes = memoryview((torch.clamp(net_image, min=0, max=1.0) * 255).byte().permute(1, 2, 0).contiguous().cpu().numpy())
+                            network_gui.send(net_image_bytes, dataset.source_path)
+                            if do_training and ((iteration < int(opt.coarse_iterations)) or not keep_alive):
+                                break
+                        except Exception as e:
+                            network_gui.conn = None
 
-                # Every 1000 its we increase the levels of SH up to a maximum degree
-                if iteration % max(1, int(math.floor(opt.coarse_iterations * opt.SH_increase_after_train_percent))) == 0:
-                    gaussians.oneupSHdegree()
+                    iter_start.record()
 
-                # Render
-                if (iteration - 1) == debug_from:
-                    pipe.debug = True
+                    # Every 1000 its we increase the levels of SH up to a maximum degree
+                    if iteration % max(1, int(math.floor(opt.coarse_iterations * opt.SH_increase_after_train_percent))) == 0:
+                        gaussians.oneupSHdegree()
 
-                #render_pkg = render_coarse(viewpoint_cam, gaussians, pipe, background, indices = indices)
-                render_pkg = render_gsplat(
-                        viewpoint_cam, 
-                        gaussians._xyz,
-                        gaussians.get_opacity,
-                        gaussians.get_scaling, 
-                        gaussians.get_rotation,
-                        gaussians._features_dc,
-                        gaussians._features_rest,
-                        pipe, 
-                        background,
-                        #splat_args=splat_settings,
-                        sh_degree = gaussians.active_sh_degree,
-                        )
-                image = render_pkg["render"]
-                
-                # Loss
-                gt_image = restore_image_tensor(viewpoint_cam, 'original_image',
-                    viewpoint_cam.original_image.cuda(non_blocking=True)).float()
-                #torchvision.utils.save_image(image, os.path.join(scene.model_path, str(iteration) + ".png"))
-                #torchvision.utils.save_image(gt_image, os.path.join(scene.model_path, "gt_" + str(iteration) + ".png"))
-                loss_image = image
-                if viewpoint_cam.alpha_mask is not None:
-                    loss_image = image * restore_image_tensor(viewpoint_cam, 'alpha_mask',
-                        viewpoint_cam.alpha_mask.cuda(non_blocking=True)).float()
-                Ll1 = l1_loss(loss_image, gt_image)
-                if getattr(opt, "coarse_fused_ssim", True):
-                    ssim_value = fused_ssim(loss_image.unsqueeze(0), gt_image.unsqueeze(0))
-                else:
-                    ssim_value = ssim(loss_image, gt_image)
-                loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
-                loss.backward()
-                iter_end.record()
+                    # Render
+                    if (iteration - 1) == debug_from:
+                        pipe.debug = True
 
+                    #render_pkg = render_coarse(viewpoint_cam, gaussians, pipe, background, indices = indices)
+                    render_pkg = render_gsplat(
+                            viewpoint_cam,
+                            gaussians._xyz,
+                            gaussians.get_opacity,
+                            gaussians.get_scaling,
+                            gaussians.get_rotation,
+                            gaussians._features_dc,
+                            gaussians._features_rest,
+                            pipe,
+                            background,
+                            #splat_args=splat_settings,
+                            sh_degree = gaussians.active_sh_degree,
+                            )
+                    image = render_pkg["render"]
 
-                with torch.no_grad():
-                    # Progress bar
-                    ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
-                    if iteration % 10 == 0:
-                        progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "Size": f"{gaussians._xyz.size(0)}", "Peak memory": f"{torch.cuda.max_memory_allocated(device='cuda')}"})
-                        progress_bar.update(10)
+                    # Loss
+                    gt_image = restore_image_tensor(viewpoint_cam, 'original_image',
+                        viewpoint_cam.original_image.cuda(non_blocking=True)).float()
+                    #torchvision.utils.save_image(image, os.path.join(scene.model_path, str(iteration) + ".png"))
+                    #torchvision.utils.save_image(gt_image, os.path.join(scene.model_path, "gt_" + str(iteration) + ".png"))
+                    loss_image = image
+                    if viewpoint_cam.alpha_mask is not None:
+                        loss_image = image * restore_image_tensor(viewpoint_cam, 'alpha_mask',
+                            viewpoint_cam.alpha_mask.cuda(non_blocking=True)).float()
+                    Ll1 = l1_loss(loss_image, gt_image)
+                    if getattr(opt, "coarse_fused_ssim", True):
+                        ssim_value = fused_ssim(loss_image.unsqueeze(0), gt_image.unsqueeze(0))
+                    else:
+                        ssim_value = ssim(loss_image, gt_image)
+                    loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
+                    loss.backward()
+                    iter_end.record()
 
-                    # Log and save
-                    if (iteration in saving_iterations):
-                        print("\n[ITER {}] Saving Gaussians".format(iteration))
-                        scene.save(iteration)
-
-                    if iteration == opt.coarse_iterations:
-                        progress_bar.close()
-                        shutdown_camera_loader(training_generator)
-                        return
-
-                    # Optimizer step
-                    if iteration < opt.coarse_iterations:
-                        gaussians.exposure_optimizer.step()
-                        gaussians.exposure_optimizer.zero_grad(set_to_none = True)
-                        gaussians._scaling.grad[:gaussians.skybox_points,:] = 0
-                        relevant = (gaussians._opacity.grad != 0).nonzero()
-                        gaussians.optimizer.step(relevant)
-                        gaussians.optimizer.zero_grad(set_to_none = True)
-
-                    if (iteration in checkpoint_iterations):
-                        print("\n[ITER {}] Saving Checkpoint".format(iteration))
-                        torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
 
                     with torch.no_grad():
-                        vals, _ = gaussians.get_scaling.max(dim=1)
-                        violators = vals > scene.cameras_extent * 0.1
-                        violators[:gaussians.skybox_points] = False
-                        gaussians._scaling[violators] = gaussians.scaling_inverse_activation(gaussians.get_scaling[violators] * 0.8)
+                        # Progress bar
+                        ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
+                        if iteration % 10 == 0:
+                            progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "Size": f"{gaussians._xyz.size(0)}", "Peak memory": f"{torch.cuda.max_memory_allocated(device='cuda')}"})
+                            progress_bar.update(10)
+
+                        # Complete the update before publishing a resumable checkpoint.
+                        gaussians.exposure_optimizer.step()
+                        gaussians.exposure_optimizer.zero_grad(set_to_none=True)
+                        gaussians._scaling.grad[:gaussians.skybox_points, :] = 0
+                        relevant = (gaussians._opacity.grad != 0).nonzero()
+                        gaussians.optimizer.step(relevant)
+                        gaussians.optimizer.zero_grad(set_to_none=True)
+
+                        with torch.no_grad():
+                            vals, _ = gaussians.get_scaling.max(dim=1)
+                            violators = vals > scene.cameras_extent * 0.1
+                            violators[:gaussians.skybox_points] = False
+                            gaussians._scaling[violators] = gaussians.scaling_inverse_activation(gaussians.get_scaling[violators] * 0.8)
 
 
-                    iteration += 1
+                        from utils.training_control import checkpoint_requested, acknowledge_checkpoint
+                        requested = checkpoint_requested()
+                        if requested or iteration in checkpoint_iterations or iteration == opt.coarse_iterations or (checkpoint_every and iteration % checkpoint_every == 0):
+                            latest = os.path.join(scene.model_path, 'scaffold_latest.pt')
+                            with open(latest + '.tmp', 'wb') as handle:
+                                torch.save(dict(model=gaussians.capture(), iteration=iteration,
+                                    exposure=gaussians._exposure, exposure_mapping=gaussians.exposure_mapping,
+                                    exposure_optimizer=gaussians.exposure_optimizer.state_dict(),
+                                    skybox_points=gaussians.skybox_points, rng=torch.get_rng_state(),
+                                    cuda_rng=torch.cuda.get_rng_state_all()), handle)
+                                handle.flush()
+                                os.fsync(handle.fileno())
+                            os.replace(latest + '.tmp', latest)
+                            acknowledge_checkpoint(latest, iteration, 'scaffold')
+                            print(f'Scaffold checkpoint saved after iteration {iteration}', flush=True)
+                        if iteration in saving_iterations:
+                            scene.save(iteration)
+                        if iteration == opt.coarse_iterations:
+                            progress_bar.close()
+                            return
+
+                        if viewer is not None:
+                            viewer.poll(iteration)
+                        iteration += 1
+    finally:
+        if viewer is not None:
+            viewer.close()
+        shutdown_camera_loader(training_generator)
 
 
-def prepare_output_and_logger(args):    
+def prepare_output_and_logger(args):
     if not args.model_path:
         if os.getenv('OAR_JOB_ID'):
             unique_str=os.getenv('OAR_JOB_ID')
         else:
             unique_str = str(uuid.uuid4())
         args.model_path = os.path.join("./output/", unique_str[0:10])
-        
+
     # Set up output folder
     print("Output folder: {}".format(args.model_path))
     os.makedirs(args.model_path, exist_ok = True)
@@ -204,7 +234,7 @@ if __name__ == "__main__":
     parser.add_argument("--start_checkpoint", type=str, default = None)
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
-    
+
     print("Optimizing " + args.model_path)
 
     # Initialize system state (RNG)

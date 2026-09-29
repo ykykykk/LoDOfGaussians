@@ -758,6 +758,7 @@ class GaussianModel:
        self.percent_dense = training_args.percent_dense
        # TODO: Remove?
        self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+       self.max_radii2D = torch.zeros((self.get_xyz.shape[0],), device=self.get_xyz.device)
        self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
 
        l = [
@@ -815,7 +816,7 @@ class GaussianModel:
         self._scaling = torch.empty(0)
         self._rotation = torch.empty(0)
         self._opacity = torch.empty(0)
-        #self.max_radii2D = torch.empty(0)
+        self.max_radii2D = torch.empty(0)
         self.xyz_gradient_accum = torch.empty(0)
         self.denom = torch.empty(0)
         self.optimizer = None
@@ -864,12 +865,13 @@ class GaussianModel:
         self._scaling, 
         self._rotation, 
         self._opacity,
-        self.max_radii2D, 
+        max_radii2D,
         xyz_gradient_accum, 
         denom,
         opt_dict, 
         self.spatial_lr_scale) = model_args
         self.training_setup(training_args)
+        self.max_radii2D = max_radii2D
         self.xyz_gradient_accum = xyz_gradient_accum
         self.denom = denom
         self.optimizer.load_state_dict(opt_dict)

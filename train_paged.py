@@ -204,7 +204,12 @@ def train(args):
     print(json.dumps(dict(event='started', iteration=start, end=end, blocks=len(store.blocks),
                           image_equivalent_progress=image_progress,
                           points=sum(b['count'] for b in store.blocks), capacity_rows=pool.capacity)), flush=True)
+    viewer = None
     try:
+        if getattr(args, 'viewer', False):
+            from utils.realtime_viewer import PagedViewRenderer, RealtimeViewer
+            viewer = RealtimeViewer(PagedViewRenderer(pool, pipe), args.viewer_port)
+            print(f'Realtime viewer: {viewer.url}', flush=True)
         with log_path.open('a', encoding='utf-8') as log:
             for iteration in range(start+1, end+1):
                 torch.cuda.synchronize()
@@ -235,7 +240,7 @@ def train(args):
                 core = (..., slice(y, y+h), slice(x, x+w))
                 predicted = image if tile.alpha_mask is None else image*tile.alpha_mask
                 l1 = (predicted[core]-gt[core]).abs().mean()
-                smap = FusedSSIMMap.apply(.01**2, .03**2, image[None].contiguous(), gt[None].contiguous(), 'same', True, 2)
+                smap = FusedSSIMMap.apply(.01**2, .03**2, predicted[None].contiguous(), gt[None].contiguous(), 'same', True, 2)
                 loss = (1-opt.lambda_dssim)*l1 + opt.lambda_dssim*(1-smap[core].mean())
                 # Equal tile visits with area weights recover a uniform pixel objective.
                 sw, sh = tile.tile_source_size
@@ -273,9 +278,12 @@ def train(args):
                     else:
                         growth = pool.densify(opt)
                 final_step = iteration == end or image_progress >= opt.iterations
-                saved = iteration % checkpoint_every == 0 or final_step or growth is not None
+                from utils.training_control import checkpoint_requested, acknowledge_checkpoint
+                requested = checkpoint_requested()
+                saved = requested or iteration % checkpoint_every == 0 or final_step or growth is not None
                 if saved:
                     save(iteration)
+                    acknowledge_checkpoint(store.root / "manifest.json", iteration, "paged")
                 elapsed = time.perf_counter()-tick
                 record = dict(iteration=iteration, image_equivalent_progress=image_progress,
                     loss=float(loss.detach()), tile_steps_per_second=1/elapsed,
@@ -291,6 +299,8 @@ def train(args):
                 if iteration == start+1 or iteration % 10 == 0 or saved:
                     print(json.dumps(record, allow_nan=False), flush=True)
                 del packet, raw, pkg, image, gt, predicted, smap, loss, objective, tile
+                if viewer is not None:
+                    viewer.poll(iteration)
                 if final_step:
                     break
         if args.export_ply:
@@ -299,6 +309,8 @@ def train(args):
                               elapsed_s=time.perf_counter()-started,
                               checkpoint=str(store.root/'manifest.json'))), flush=True)
     finally:
+        if viewer is not None:
+            viewer.close()
         lookahead.close()
         transfer.close()
 
@@ -311,6 +323,8 @@ def main():
     parser.add_argument('--config')
     parser.add_argument('--steps', type=int, help='Maximum optimizer/tile updates for this run; iterations in config counts image coverage')
     parser.add_argument('--export-ply')
+    parser.add_argument('--viewer', action='store_true', help='Enable live browser preview between training steps')
+    parser.add_argument('--viewer-port', type=int, default=8765)
     args = parser.parse_args()
     train(args)
 

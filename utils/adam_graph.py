@@ -5,6 +5,10 @@ Adam is already a single kernel, so this graph is only a Torch fallback.
 The captured code reads LR/bias corrections from fixed-address input tensors.
 """
 import math
+import threading
+
+# CUDA global graph capture must not overlap auxiliary preview allocations.
+PREVIEW_CAPTURE_LOCK = threading.RLock()
 import torch
 
 
@@ -53,7 +57,7 @@ class PacketAdamGraph:
             graph = torch.cuda.CUDAGraph()
             stream = torch.cuda.Stream(device=grad.device)
             stream.wait_stream(torch.cuda.current_stream(grad.device))
-            with torch.cuda.graph(graph, stream=stream):
+            with PREVIEW_CAPTURE_LOCK, torch.cuda.graph(graph, stream=stream):
                 masked = gradient.masked_fill(frozen[:, None], 0)
                 tensor_adam_step(packet.state, masked, rate_input, corrections)
             torch.cuda.current_stream(grad.device).wait_stream(stream)

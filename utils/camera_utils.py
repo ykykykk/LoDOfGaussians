@@ -27,7 +27,10 @@ def loadCam(args, id, cam_info, resolution_scale, is_test_dataset, compact_image
 
     if cam_info.mask_path != "":
         try:
-            alpha_mask = Image.open(cam_info.mask_path)
+            with Image.open(cam_info.mask_path) as mask_image:
+                alpha_mask = mask_image.convert('L')
+            if alpha_mask.size != image.size:
+                raise ValueError(f'Mask size {alpha_mask.size} does not match image {image.size}: {cam_info.mask_path}')
         except FileNotFoundError:
             print(f"Error: The mask file at path '{cam_info.mask_path}' was not found.")
             raise

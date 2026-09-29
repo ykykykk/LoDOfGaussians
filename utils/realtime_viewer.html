@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><title>YK Gaussian · 实时场景</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#101419;color:#dfe5ee;font:14px system-ui}header{height:64px;display:flex;align-items:center;gap:20px;padding:0 24px;border-bottom:1px solid #303943}b{font-size:18px;color:#83dcc4}button,select{background:#26323e;border:1px solid #475564;border-radius:6px;color:inherit;padding:7px 12px}main{height:calc(100vh - 110px);display:flex;align-items:center;justify-content:center}img{width:100%;height:100%;object-fit:contain;touch-action:none;cursor:grab}footer{padding:12px 24px;color:#9daebf}#status{margin-left:auto}#error{position:fixed;top:80px;left:24px;right:24px;color:#ffbd93;white-space:pre-wrap;pointer-events:none}
+</style>
+<header><b>YK Gaussian</b><span>实时场景</span><button id="reset">复位视角</button><label>向上轴 <select id="up-axis"><option value="Y">Y</option><option value="Z" selected>Z</option></select></label><select id="quality"><option value="640">640 · 快速</option><option value="960" selected>960 · 标准</option><option value="1440">1440 · 清晰</option></select><label><input type="checkbox" id="preview" checked>启用预览</label><span id="status">连接中…</span></header>
+<main><img id="view" alt="等待 GPU 渲染"></main><div id="error"></div><footer>左键旋转 · 右键 / Shift 拖动平移 · 滚轮缩放 ｜ 预览分辨率不改变训练分辨率</footer>
+<script>
+const view=document.querySelector('#view'),status=document.querySelector('#status'),error=document.querySelector('#error');
+let home,camera,dirty=true,busy=false,last=null,objectURL,lastInteraction=0,lastFrame=0;
+let settings={target_fps:30,idle_fps:2,interaction_width:640};
+async function init(){try{const r=await fetch('/api/state');if(!r.ok)throw Error(await r.text());const s=await r.json();settings=s.preview_config||settings;home=s.home;camera={...structuredClone(home),up_axis:document.querySelector("#up-axis").value};status.textContent=`${s.points.toLocaleString()} 点`;dirty=true}catch(e){error.textContent=e.message}}
+document.querySelector('#reset').onclick=()=>{if(home){camera={...structuredClone(home),up_axis:document.querySelector("#up-axis").value};dirty=true}};
+document.querySelector('#up-axis').onchange=e=>{if(camera){camera.up_axis=e.target.value;dirty=true}};
+document.querySelector('#preview').onchange=e=>{fetch('/api/preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:e.target.checked})}).catch(()=>{});dirty=true;view.style.pointerEvents=e.target.checked?'auto':'none';status.textContent=e.target.checked?'预览已开启':'预览已关闭，训练继续'};
+document.querySelector('#quality').onchange=()=>dirty=true;
+view.oncontextmenu=e=>e.preventDefault();
+view.onpointerdown=e=>{last={x:e.clientX,y:e.clientY,pan:e.button===2||e.shiftKey};view.setPointerCapture(e.pointerId)};
+view.onpointerup=view.onpointercancel=()=>last=null;
+view.onpointermove=e=>{if(!last||!camera)return;const dx=e.clientX-last.x,dy=e.clientY-last.y;last.x=e.clientX;last.y=e.clientY;lastInteraction=performance.now();if(last.pan){const k=camera.distance*.0015,y=camera.yaw,p=camera.pitch;let right=[Math.cos(y),0,-Math.sin(y)],up=[-Math.sin(y)*Math.sin(p),Math.cos(p),-Math.cos(y)*Math.sin(p)];if(camera.up_axis==='Z'){right=[right[0],-right[2],right[1]];up=[up[0],-up[2],up[1]]}for(let i=0;i<3;i++)camera.target[i]+=(-dx*right[i]+dy*up[i])*k}else{camera.yaw-=dx*.006;camera.pitch=Math.max(-1.55,Math.min(1.55,camera.pitch+dy*.006))}dirty=true};
+view.addEventListener('wheel',e=>{e.preventDefault();if(camera){lastInteraction=performance.now();camera.distance=Math.max(1e-5,Math.min(1e9,camera.distance*Math.exp(e.deltaY*.001)));dirty=true}},{passive:false});
+async function frame(){if(!document.querySelector('#preview').checked||busy||!camera||document.hidden)return;const now=performance.now(),interacting=last||now-lastInteraction<200,fps=(interacting||dirty)?settings.target_fps:settings.idle_fps;if(now-lastFrame<1000/Math.max(1,fps))return;lastFrame=now;busy=true;dirty=false;try{let width=+document.querySelector('#quality').value;if(interacting)width=Math.min(width,settings.interaction_width);const height=Math.max(64,Math.min(1080,Math.round(width*view.clientHeight/view.clientWidth)));const r=await fetch('/api/render',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...camera,width,height})});if(r.status===503){error.textContent=await r.text();dirty=true;return}if(!r.ok)throw Error(await r.text());const blob=await r.blob(),old=objectURL;objectURL=URL.createObjectURL(blob);view.src=objectURL;if(old)URL.revokeObjectURL(old);status.textContent=`${r.headers.get('X-Render-Ms')} ms · ${Number(r.headers.get('X-Visible-Points')).toLocaleString()} 可见点 · 步 ${r.headers.get('X-Iteration')}`;error.textContent=''}catch(e){error.textContent=e.message;document.querySelector('#preview').checked=false}finally{busy=false}}
+window.addEventListener('resize',()=>dirty=true);init();setInterval(frame,16);
+</script></html>

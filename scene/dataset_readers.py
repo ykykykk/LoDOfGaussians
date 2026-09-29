@@ -250,13 +250,22 @@ def readColmapSceneInfo(path, images, masks, depths, eval, train_test_exp, llffh
         test_cam_names_list = []
 
     reading_dir = "images" if images == None else images
-    masks_reading_dir = masks if masks == "" else os.path.join(path + "/../rectified", masks)
+    masks_reading_dir = ""
+    if masks:
+        masks_reading_dir = os.path.join(path, masks)
+        if not os.path.isdir(masks_reading_dir) and not os.path.isabs(masks):
+            masks_reading_dir = os.path.join(path, '..', 'rectified', masks)
 
     cam_infos_unsorted = readColmapCameras(
         cam_extrinsics=cam_extrinsics, cam_intrinsics=cam_intrinsics, depths_params=depths_params, 
         images_folder=os.path.join(path, reading_dir), masks_folder=masks_reading_dir,
         depths_folder=os.path.join(path + "/../rectified", depths), test_cam_names_list=test_cam_names_list)
     cam_infos = sorted(cam_infos_unsorted.copy(), key = lambda x : x.image_name)
+    if masks:
+        matched = sum(bool(c.mask_path) for c in cam_infos)
+        print(f'Masks: {matched}/{len(cam_infos)} cameras ({masks_reading_dir})')
+        if os.path.isdir(masks_reading_dir) and matched != len(cam_infos):
+            raise ValueError('Mask folder exists but some camera masks are missing; use matching image basenames.')
 
     train_cam_infos = [c for c in cam_infos if train_test_exp or not c.is_test]
     test_cam_infos = [c for c in cam_infos if c.is_test]

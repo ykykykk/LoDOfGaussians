@@ -2,6 +2,7 @@
 from dataclasses import asdict, dataclass
 import json
 import math
+import os
 from pathlib import Path
 import platform
 import time
@@ -100,8 +101,7 @@ def _backward(packet, camera, g, opt, pipe, background, profile):
         gt = camera.original_image
         predicted = image if camera.alpha_mask is None else image * camera.alpha_mask
         loss = (1 - opt.lambda_dssim) * l1_loss(predicted, gt)
-        # Retain v1's effective unmasked SSIM term.
-        loss = loss + opt.lambda_dssim * (1 - fused_ssim(image[None], gt[None]))
+        loss = loss + opt.lambda_dssim * (1 - fused_ssim(predicted[None], gt[None]))
     with profile.phase('backward'):
         loss.backward()
         screen = pkg['viewspace_points'].grad
@@ -138,7 +138,7 @@ def _grow_cpu_backing(g, pool, required, cap_max):
 
 
 def training(dataset, opt, pipe, saving_iterations, view_graph=None, runtime=None,
-             resume_checkpoint=None, allow_growth_resume=False):
+             resume_checkpoint=None, allow_growth_resume=False, viewer_config=None):
     from scene import Scene, GaussianModel
     from utils.general_utils import get_expon_lr_func
     from utils.training_runtime import shutdown_camera_loader
@@ -171,7 +171,7 @@ def training(dataset, opt, pipe, saving_iterations, view_graph=None, runtime=Non
     from utils.resident_checkpoint import load_checkpoint, save_checkpoint
     contract = (dict(source=str(Path(dataset.source_path).resolve()), resolution=dataset.resolution,
                     hierarchy=str(Path(dataset.hierarchy).resolve()), options=vars(opt), pipeline=vars(pipe))
-                if settings.checkpoint_every or resume_checkpoint else {})
+                if settings.checkpoint_every or resume_checkpoint or os.environ.get('YK_SAVE_REQUEST') else {})
     if settings.representation == 'flat':
         contract['representation'] = 'flat'
     restored = load_checkpoint(resume_checkpoint, g, contract, opt.iterations,
@@ -278,8 +278,24 @@ def training(dataset, opt, pipe, saving_iterations, view_graph=None, runtime=Non
             ticket.epoch = builder.generation
         return ticket.ids
 
+    def preview_select(camera, capacity):
+        if settings.representation == 'flat':
+            ids = builder.select(g, camera)
+            if len(ids) > capacity:
+                raise RuntimeError('Preview exceeds resident pool capacity; zoom closer')
+            return ids
+        focal = effective_focal(camera) if pixel_lod else camera.focal_length
+        budget = min(capacity, settings.max_active_nodes) if settings.max_active_nodes > 0 else capacity
+        return select_with_budget(g, camera, opt, base_focal / focal, native=native,
+                                  max_active_nodes=budget)[0]
+
+    from utils.initial_viewer import start_initial_viewer
+    viewer = None
     physical_vram = torch.cuda.mem_get_info()[1]
     try:
+        viewer = start_initial_viewer(viewer_config, g, pipe, background,
+                                      pool=lambda: pool, select=preview_select,
+                                      before_render=adam_graph.reset)
         for iteration in range(first_iteration, opt.iterations+1):
             profile.begin(iteration)
             with profile.phase('allocator_trim'):
@@ -323,15 +339,6 @@ def training(dataset, opt, pipe, saving_iterations, view_graph=None, runtime=Non
                 raise FloatingPointError(f'non-finite resident loss at iteration {iteration}')
             active_count = len(packet.ids)
             ema = .4 * scalar + .6 * ema
-            if iteration in saving_iterations or iteration == opt.iterations:
-                with profile.phase('save'):
-                    pool.flush()
-                    filename = opt.output_file_name if iteration == opt.iterations else f'iteration_{iteration}'
-                    if settings.representation == 'flat':
-                        save_checkpoint(output / 'resident_latest.pt', g, iteration, contract,
-                                        seed, tracker, ema, empty_windows)
-                    else:
-                        g.save_hierarchy(str(output), file_name=filename)
             if iteration < opt.iterations and split:
                 with profile.phase('densify_rebuild'):
                     released_store_bytes = sum(t.numel()*t.element_size() for t in (pool.state, pool.scores) if t is not None)
@@ -387,7 +394,7 @@ def training(dataset, opt, pipe, saving_iterations, view_graph=None, runtime=Non
                             pool.resize_empty(desired)
 
             else:
-                if iteration < opt.iterations:
+                if iteration <= opt.iterations:
                     with profile.phase('adam'):
                         # Only XYZ has a schedule; retain all other rates and
                         # the vector's address instead of seven scalar writes.
@@ -400,11 +407,23 @@ def training(dataset, opt, pipe, saving_iterations, view_graph=None, runtime=Non
                             builder.update(packet.ids, packet.state)
                 del packet, grad
             ticket = next_ticket
-            if settings.checkpoint_every and iteration > 0 and iteration < opt.iterations and iteration % settings.checkpoint_every == 0:
+            if iteration in saving_iterations or iteration == opt.iterations:
+                with profile.phase('save'):
+                    pool.flush()
+                    filename = opt.output_file_name if iteration == opt.iterations else f'iteration_{iteration}'
+                    if settings.representation == 'flat':
+                        save_checkpoint(output / 'resident_latest.pt', g, iteration, contract,
+                                        seed, tracker, ema, empty_windows)
+                    else:
+                        g.save_hierarchy(str(output), file_name=filename)
+            from utils.training_control import checkpoint_requested, acknowledge_checkpoint
+            requested = checkpoint_requested()
+            if requested or (settings.checkpoint_every and iteration > 0 and (iteration == opt.iterations or iteration % settings.checkpoint_every == 0)):
                 with profile.phase('checkpoint'):
                     pool.flush()
                     save_checkpoint(output / 'resident_latest.pt', g, iteration, contract,
                                     seed, tracker, ema, empty_windows)
+                    acknowledge_checkpoint(output / 'resident_latest.pt', iteration, 'resident')
                     print(f'Resident checkpoint saved after iteration {iteration}', flush=True)
             if iteration % 10 == 0:
                 hit = pool.stats['hit_rows'] / max(pool.stats['requested_rows'], 1)
@@ -419,7 +438,11 @@ def training(dataset, opt, pipe, saving_iterations, view_graph=None, runtime=Non
                 direct_resident=type(pool).__name__ == 'DirectResidentPool',
                 image_prefetch_uploads=transfer.prefetch_uploads, graph_captures=adam_graph.captures,
                 graph_replays=adam_graph.replays, **pool.stats, **builder.stats)
+            if viewer is not None:
+                viewer.poll(iteration)
     finally:
+        if viewer is not None:
+            viewer.close()
         # Join the CPU fetcher before shutting down DataLoader workers; retire
         # all DMA owners before invalidating or freeing their destination slots.
         try:

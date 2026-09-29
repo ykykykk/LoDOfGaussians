@@ -110,7 +110,7 @@ def evaluate(args):
                         preview[0][dst] = gt[src].cpu()
                         preview[1][dst] = prediction[src].cpu()
                 error += (prediction[core]-gt[core]).square().double().sum().item()
-                ssim_map = FusedSSIMMap.apply(.01**2, .03**2, image[None].contiguous(),
+                ssim_map = FusedSSIMMap.apply(.01**2, .03**2, prediction[None].contiguous(),
                                              gt[None].contiguous(), 'same', False, 2)
                 ssim += ssim_map[core].double().sum().item()
                 pixels += w*h
@@ -145,7 +145,7 @@ def evaluate(args):
         settings=dict(resolution=1, tile_size=args.tile_size, halo=args.halo, camera_limit=args.camera_limit,
             camera_selection='heldout image_name ascending', capacity_rows=pool.capacity,
             psnr='pixel-weighted RGB MSE; alpha applied to prediction',
-            ssim='pixel-weighted RGB map, unmasked, halo then core; training convention'),
+            ssim='pixel-weighted RGB map, alpha applied to prediction, halo then core; training convention'),
         seconds=time.perf_counter()-started, peak_allocated_gib=torch.cuda.max_memory_allocated()/2**30,
         cache_stats=pool.stats)
     output = Path(args.output_json)
