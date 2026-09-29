@@ -51,6 +51,11 @@ def training(dataset, opt, pipe, saving_iterations, checkpoint_iterations, check
             torch.cuda.set_rng_state_all([state.cpu() for state in saved['cuda_rng']])
         print(f'Resumed scaffold checkpoint after iteration {first_iter}', flush=True)
 
+    from utils.mask_crop import training_cropper
+    mask_cropper = training_cropper(dataset.source_path)
+    if mask_cropper is not None:
+        mask_cropper.scaffold(gaussians)
+
     if first_iter >= opt.coarse_iterations:
         scene.save(opt.coarse_iterations)
         return
@@ -138,16 +143,18 @@ def training(dataset, opt, pipe, saving_iterations, checkpoint_iterations, check
                         viewpoint_cam.original_image.cuda(non_blocking=True)).float()
                     #torchvision.utils.save_image(image, os.path.join(scene.model_path, str(iteration) + ".png"))
                     #torchvision.utils.save_image(gt_image, os.path.join(scene.model_path, "gt_" + str(iteration) + ".png"))
-                    loss_image = image
+                    mask = None
                     if viewpoint_cam.alpha_mask is not None:
-                        loss_image = image * restore_image_tensor(viewpoint_cam, 'alpha_mask',
+                        mask = restore_image_tensor(viewpoint_cam, 'alpha_mask',
                             viewpoint_cam.alpha_mask.cuda(non_blocking=True)).float()
+                    from utils.mask_loss import mask_targets
+                    loss_image, gt_image, alpha_loss = mask_targets(image, gt_image, mask, render_pkg['alpha'], background)
                     Ll1 = l1_loss(loss_image, gt_image)
                     if getattr(opt, "coarse_fused_ssim", True):
                         ssim_value = fused_ssim(loss_image.unsqueeze(0), gt_image.unsqueeze(0))
                     else:
                         ssim_value = ssim(loss_image, gt_image)
-                    loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
+                    loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value) + alpha_loss
                     loss.backward()
                     iter_end.record()
 
@@ -173,6 +180,9 @@ def training(dataset, opt, pipe, saving_iterations, checkpoint_iterations, check
                             violators[:gaussians.skybox_points] = False
                             gaussians._scaling[violators] = gaussians.scaling_inverse_activation(gaussians.get_scaling[violators] * 0.8)
 
+
+                        if mask_cropper is not None and (iteration % mask_cropper.interval == 0 or iteration == opt.coarse_iterations):
+                            mask_cropper.scaffold(gaussians)
 
                         from utils.training_control import checkpoint_requested, acknowledge_checkpoint
                         requested = checkpoint_requested()

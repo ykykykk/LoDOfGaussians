@@ -34,7 +34,7 @@ def portable_backends():
 
 def main():
     parser = argparse.ArgumentParser(prog='yk-gaussian', description='YK Gaussian portable CLI')
-    parser.add_argument('--version', action='version', version='YK Gaussian Studio 0.4.0')
+    parser.add_argument('--version', action='version', version='YK Gaussian Studio 0.4.1')
     parser.add_argument('command', nargs='?', choices=[*COMMANDS, 'doctor', 'ui', 'control'],
                         help='; '.join(f'{k}: {v[1]}' for k, v in COMMANDS.items()))
     if len(sys.argv) == 1:

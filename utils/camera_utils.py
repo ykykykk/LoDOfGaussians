@@ -24,6 +24,10 @@ WARNED = False
 def loadCam(args, id, cam_info, resolution_scale, is_test_dataset, compact_images=False):
     from scene.cameras import Camera
     image = Image.open(cam_info.image_path)
+    if os.environ.get('YK_MASK_MODE') == 'none':
+        image = image.convert('RGB')
+    elif 'transparency' in image.info:
+        image = image.convert('RGBA')
 
     if cam_info.mask_path != "":
         try:

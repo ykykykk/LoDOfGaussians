@@ -126,6 +126,7 @@ def render_gsplat(viewpoint_camera,
         pass
     out = {
         "render": rendered_image,
+        "alpha": alphas[0].permute(2, 0, 1),
         "viewspace_points": means2D,
         "radii": radii,
         "packed_indices": packed_indices
@@ -338,6 +339,5 @@ def render_on_disk(
             #"visibility_filter" : vis_filter,
             #"radii": radii[vis_filter]
             "seen" : seen}
-
 
 

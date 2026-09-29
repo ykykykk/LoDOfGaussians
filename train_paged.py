@@ -142,6 +142,17 @@ def train(args):
         # Refinement cannot append pages; unused growth slots only steal render memory.
         capacity = min(capacity, len(store.blocks)*store.block_rows)
     pool = PagedGaussianPool(store, capacity, native)
+    crop_views = None
+    if os.environ.get('YK_MASK_MODE') == 'crop':
+        from utils.mask_crop import load_views
+        from utils.paged_mask_crop import crop_pool
+        crop_config = json.loads((Path(__file__).parent / 'configs/mask_crop.json').read_text())
+        crop_interval = int(crop_config.get('training_interval', 250))
+        if crop_interval <= 0:
+            raise ValueError('Mask crop training_interval must be positive')
+        crop_views = load_views(source, crop_config)
+        initial_crop = crop_pool(pool, crop_views, crop_config)
+        print(json.dumps(dict(event='mask_crop', **initial_crop)), flush=True)
     seed = int(metadata.get('seed', 0))
     if metadata.get('rng') is not None:
         torch.set_rng_state(metadata['rng'])
@@ -230,7 +241,33 @@ def train(args):
                 after_load = time.perf_counter()
                 raw = packet.parameters()
                 if not len(raw):
-                    raise RuntimeError('Tile contains no Gaussian points')
+                    if crop_views is None:
+                        raise RuntimeError('Tile contains no Gaussian points')
+                    # Cropped background tiles legitimately contain no model. Consume
+                    # their coverage without creating gradients or aborting the run.
+                    pool.finish_step(packet)
+                    _, _, w, h = tile.tile_core
+                    sw, sh = tile.tile_source_size
+                    visits[key] = visits.get(key, 0)+1
+                    image_progress += w*h/(sw*sh)
+                    final_step = iteration == end or image_progress >= opt.iterations
+                    from utils.training_control import checkpoint_requested, acknowledge_checkpoint
+                    saved = checkpoint_requested() or iteration % checkpoint_every == 0 or final_step
+                    if saved:
+                        save(iteration)
+                        acknowledge_checkpoint(store.root / 'manifest.json', iteration, 'paged')
+                    record = dict(event='empty_crop_tile', iteration=iteration,
+                        image_equivalent_progress=image_progress, camera=key, tile=tile.tile_index,
+                        total_points=sum(b['count'] for b in store.blocks), checkpoint=bool(saved))
+                    log.write(json.dumps(record)+'\n'); log.flush()
+                    if saved:
+                        print(json.dumps(record), flush=True)
+                    del packet, raw, tile
+                    if viewer is not None:
+                        viewer.poll(iteration)
+                    if final_step:
+                        break
+                    continue
                 pkg = render_gsplat(tile, raw[:, :3].contiguous(), raw[:, 13:14].sigmoid(),
                     raw[:, 3:6].exp(), torch.nn.functional.normalize(raw[:, 6:10], dim=1),
                     raw[:, 10:13, None].transpose(1, 2), raw[:, 14:].reshape(len(raw), -1, 3),
@@ -238,10 +275,11 @@ def train(args):
                 image, gt = pkg['render'], tile.original_image
                 x, y, w, h = tile.tile_core
                 core = (..., slice(y, y+h), slice(x, x+w))
-                predicted = image if tile.alpha_mask is None else image*tile.alpha_mask
+                from utils.mask_loss import mask_targets
+                predicted, gt, alpha_loss = mask_targets(image, gt, tile.alpha_mask, pkg['alpha'], background, core)
                 l1 = (predicted[core]-gt[core]).abs().mean()
                 smap = FusedSSIMMap.apply(.01**2, .03**2, predicted[None].contiguous(), gt[None].contiguous(), 'same', True, 2)
-                loss = (1-opt.lambda_dssim)*l1 + opt.lambda_dssim*(1-smap[core].mean())
+                loss = (1-opt.lambda_dssim)*l1 + opt.lambda_dssim*(1-smap[core].mean()) + alpha_loss
                 # Equal tile visits with area weights recover a uniform pixel objective.
                 sw, sh = tile.tile_source_size
                 previous_progress = image_progress
@@ -278,9 +316,13 @@ def train(args):
                     else:
                         growth = pool.densify(opt)
                 final_step = iteration == end or image_progress >= opt.iterations
+                crop = None
+                if crop_views is not None and (iteration % crop_interval == 0 or final_step):
+                    crop = crop_pool(pool, crop_views, crop_config)
+                    metadata['mask_crop_training'] = dict(iteration=iteration, **crop)
                 from utils.training_control import checkpoint_requested, acknowledge_checkpoint
                 requested = checkpoint_requested()
-                saved = requested or iteration % checkpoint_every == 0 or final_step or growth is not None
+                saved = requested or iteration % checkpoint_every == 0 or final_step or growth is not None or crop is not None
                 if saved:
                     save(iteration)
                     acknowledge_checkpoint(store.root / "manifest.json", iteration, "paged")
@@ -294,7 +336,7 @@ def train(args):
                     backward_s=after_backward-after_render, adam_bounds_s=after_adam-after_backward,
                     growth_checkpoint_s=time.perf_counter()-after_adam, elapsed_s=elapsed,
                     peak_allocated_bytes=torch.cuda.max_memory_allocated(), checkpoint=saved, growth=growth,
-                    cache=dict(pool.stats))
+                    cache=dict(pool.stats), mask_crop=crop, alpha_loss=float(alpha_loss.detach()))
                 log.write(json.dumps(record, allow_nan=False)+'\n'); log.flush()
                 if iteration == start+1 or iteration % 10 == 0 or saved:
                     print(json.dumps(record, allow_nan=False), flush=True)

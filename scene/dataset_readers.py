@@ -185,6 +185,8 @@ def storePly(path, xyz, rgb):
     ply_data.write(path)
 
 def readColmapSceneInfo(path, images, masks, depths, eval, train_test_exp, llffhold=None):
+    if os.environ.get('YK_MASK_MODE') == 'none':
+        masks = ''
     try:
         cameras_extrinsic_file = os.path.join(path, "sparse/0", "images.bin")
         cameras_intrinsic_file = os.path.join(path, "sparse/0", "cameras.bin")

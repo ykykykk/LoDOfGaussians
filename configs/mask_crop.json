@@ -1,0 +1,8 @@
+{
+  "training_interval": 250,
+  "mask_max_dimension": 1024,
+  "foreground_threshold": 128,
+  "boundary_margin_pixels": 2.0,
+  "minimum_outside_views": 2,
+  "outside_view_fraction": 0.8
+}

@@ -66,6 +66,7 @@ def load_project(path):
     if project.get('version') != 1:
         raise ValueError('Unsupported project version')
     project['path'] = str(Path(path).resolve())
+    project['settings']['import'].setdefault('mask_mode', 'ignore')
     defaults = default_settings()['initial']
     for key in ('preview', 'viewer_port'):
         project['settings']['initial'].setdefault(key, defaults[key])
@@ -124,6 +125,9 @@ def result_available(project, step):
                if key in ('report', 'checkpoint', 'ply', 'flat_checkpoint', 'config') and value)
 
 def update_settings(project, step, settings):
+    if step == 'import' and settings.get('mask_mode', 'ignore') not in ('none', 'ignore', 'crop'):
+        raise ValueError('mask_mode must be none, ignore or crop')
+    old_mask_mode = project['settings']['import'].get('mask_mode', 'ignore')
     if step == 'train':
         settings = copy.deepcopy(settings)
         if settings.get('reuse_model') and settings.get('resume_latest'):
@@ -152,6 +156,12 @@ def update_settings(project, step, settings):
                    'config.resident.checkpoint_every', 'config.paged.checkpoint_every',
                    'config.resident.profile_every', 'config.paged.profile_every'}
     material = [key for key in changed if key not in operational]
+    if step == 'import' and 'mask_mode' in material:
+        new_mask_mode = settings.get('mask_mode', 'ignore')
+        material.remove('mask_mode')
+        if old_mask_mode != new_mask_mode:
+            invalidate(project, 'initial')
+            invalidate(project, 'check', downstream=False)
     if step == 'initial' and project['settings']['import'].get('checkpoint'):
         material = []
     if material:
@@ -169,7 +179,7 @@ def can_run(project, step):
     return True, ''
 
 def current_checkpoint(project):
-    for step in ('train', 'prepare', 'initial', 'import'):
+    for step in ('export', 'train', 'prepare', 'initial', 'import'):
         state = project['steps'][step]
         checkpoint = state.get('outputs', {}).get('checkpoint')
         if state['status'] == 'completed' and checkpoint and Path(checkpoint).exists():

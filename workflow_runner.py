@@ -32,6 +32,9 @@ def resume_identity(project, step):
             paths[key] = [str(Path(value).resolve()), stat.st_size, stat.st_mtime_ns]
     value = {'settings': settings, 'source': str(Path(project['settings']['import']['source_path']).resolve()),
              'dependencies': outputs, 'dependency_files': paths}
+    mode = project['settings']['import'].get('mask_mode', 'ignore')
+    if mode != 'ignore':
+        value['mask_mode'] = mode
     digest = hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode('utf-8')).hexdigest()
     return digest, value
 
@@ -114,6 +117,10 @@ def seed_checkpoint_settings(project, state):
 def execute(project, step, run_dir, previous):
     settings = project['settings'][step]
     imported = project['settings']['import']
+    mask_mode = imported.get('mask_mode', 'ignore')
+    if mask_mode not in ('none', 'ignore', 'crop'):
+        raise ValueError('mask_mode must be none, ignore or crop')
+    os.environ['YK_MASK_MODE'] = mask_mode
     source = str(Path(imported['source_path']).resolve()) if imported['source_path'] else ''
     outputs = lambda key: project['steps'][key]['outputs']
     if step == 'import':
@@ -128,7 +135,14 @@ def execute(project, step, run_dir, previous):
         return {'report': str(run_dir/'import.json'), 'source_path': source, 'checkpoint': checkpoint}
     if step == 'check':
         from utils.dataset_preflight import inspect_dataset
-        report = inspect_dataset(source, resolution=int(settings['resolution']), hold=int(settings['llff_hold']))
+        masks = Path(source)/'masks'
+        if not masks.is_dir():
+            masks = Path(source).parent/'rectified/masks'
+        if mask_mode == 'crop' and not masks.is_dir():
+            from utils.mask_crop import load_views
+            load_views(source, json.loads((ROOT/'configs/mask_crop.json').read_text()))
+        report = inspect_dataset(source, masks_dir=masks if mask_mode != 'none' and masks.is_dir() else None,
+                                 resolution=int(settings['resolution']), hold=int(settings['llff_hold']))
         return {'report': write_json(run_dir/'dataset_check.json', report)}
     if step == 'initial':
         checkpoint = outputs('import').get('checkpoint')
@@ -159,6 +173,11 @@ def execute(project, step, run_dir, previous):
         checkpoint_info(checkpoint)
         return {'checkpoint': str(checkpoint), 'config': config_path}
     if step == 'prepare':
+        def prepared(outputs):
+            if mask_mode == 'crop':
+                from utils.mask_crop import crop_checkpoint
+                outputs['checkpoint'], _ = crop_checkpoint(outputs['checkpoint'], source, run_dir/'masked_prepared')
+            return outputs
         checkpoint, state, kind = checkpoint_info(outputs('initial')['checkpoint'])
         if kind == 'paged':
             if int(settings['block_size']) != int(state['block_rows']) or bool(settings['radius_bands']) != bool(state.get('radius_bands', True)):
@@ -175,7 +194,7 @@ def execute(project, step, run_dir, previous):
             store.checkpoint()
             inherited = {'block_size': store.block_rows, 'radius_bands': state.get('radius_bands', True)}
             print('Existing paged layout inherited: '+json.dumps(inherited), flush=True)
-            return {'checkpoint': str(store.root/'manifest.json'), 'inherited_layout': inherited}
+            return prepared({'checkpoint': str(store.root/'manifest.json'), 'inherited_layout': inherited})
         config = {'resident': {'representation': 'flat'}}
         overrides = settings.get('options', {})
         allowed = {'cap_max', 'densify_max_new_nodes', 'iterations', 'densification_interval', 'densify_until_iter'}
@@ -200,7 +219,7 @@ def execute(project, step, run_dir, previous):
         run_script('tools/convert_block_checkpoint.py', args)
         checkpoint = run_dir/'blocks/manifest.json'
         checkpoint_info(checkpoint)
-        return {'checkpoint': str(checkpoint), 'flat_checkpoint': str(flat)}
+        return prepared({'checkpoint': str(checkpoint), 'flat_checkpoint': str(flat)})
     if step == 'train':
         checkpoint = outputs('prepare')['checkpoint']
         if settings.get('reuse_model'):
@@ -252,6 +271,9 @@ def execute(project, step, run_dir, previous):
     if Path(filename).name != filename or not filename.lower().endswith('.ply'):
         raise ValueError('Export filename must be a plain .ply filename')
     target = run_dir/filename
+    if mask_mode == 'crop':
+        from utils.mask_crop import crop_checkpoint
+        checkpoint, report = crop_checkpoint(checkpoint, source, run_dir/'masked_model')
     run_script('tools/export_block_ply.py', ['--checkpoint', checkpoint, '--output', target])
     if not target.is_file():
         raise RuntimeError('Export did not produce a PLY')

@@ -86,7 +86,7 @@ def main():
     subprocess.run([str(compiler), '/nologo', '/target:exe', '/platform:x64',
                     '/out:' + str(OUT / 'YK-Gaussian.exe'), str(ROOT / 'scripts/portable_launcher.cs')], check=True)
     (OUT / 'README.txt').write_text(
-        'YK Gaussian Studio 0.4 portable (Windows x64)\n\n'
+        'YK Gaussian Studio 0.4.1 portable (Windows x64)\n\n'
         'UI language follows the Windows display language: Chinese or English.\n'
         'Fine model is the model-preparation stage name.\n\n'
         'Double-click YK-Gaussian.exe for the desktop UI. No terminal is needed.\n'
@@ -109,7 +109,7 @@ def main():
         'Relative paths resolve from your terminal working directory. Bundled configs are in app/configs.\n'
         'See app/README.md and app/LICENSE.md.\n', encoding='utf-8')
     (OUT / 'build-info.json').write_text(json.dumps({
-        'version': '0.4.0', 'built_at': datetime.now(timezone.utc).isoformat(),
+        'version': '0.4.1', 'built_at': datetime.now(timezone.utc).isoformat(),
         'ui_languages': ['zh', 'en'],
         'ui_language_selection': 'Windows display language: Chinese -> zh; otherwise en',
         'commit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),

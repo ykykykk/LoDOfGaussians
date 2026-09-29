@@ -1,5 +1,6 @@
 """Ordered, persistent project workspace on top of the native viewport."""
 from ui_i18n import tr
+from ui_widgets import WheelSafeComboBox
 import copy
 import json
 import math
@@ -118,7 +119,7 @@ class WorkflowWorkspace(Workspace):
         right = QWidget()
         rl = QVBoxLayout(right)
         rl.setContentsMargins(10, 10, 10, 10)
-        self.task = QComboBox()
+        self.task = WheelSafeComboBox()
         self.task.addItems([tr(STEP_TITLES[s]) for s in STEPS])
         self.task.hide()
         self.description = QLabel('')
@@ -271,7 +272,7 @@ class WorkflowWorkspace(Workspace):
         self.training_mode = None
         if self.step == 'train':
             self.layouts['basic'].addWidget(QLabel(tr('训练方式')))
-            self.training_mode = QComboBox()
+            self.training_mode = WheelSafeComboBox()
             self.training_mode.addItem(tr('继续训练（默认）'), 'continue')
             self.training_mode.addItem(tr('从准备好的模型重新开始本轮训练'), 'restart')
             self.training_mode.addItem(tr('跳过训练，直接使用导入模型'), 'reuse')
@@ -286,6 +287,18 @@ class WorkflowWorkspace(Workspace):
             self.layouts['basic'].addWidget(self.mode_hint)
         for (path, value) in leaves(settings):
             key = path.split('.')[-1]
+            if key == 'mask_mode':
+                self.layouts['basic'].addWidget(QLabel(tr('Mask 处理')))
+                editor = WheelSafeComboBox()
+                editor.addItem(tr('不用 Mask'), 'none')
+                editor.addItem(tr('忽略：保留三维点'), 'ignore')
+                editor.addItem(tr('裁剪：匹配轮廓并剔除背景'), 'crop')
+                editor.setCurrentIndex(max(0, editor.findData(value)))
+                editor.setToolTip(tr('不用 Mask：完整图像训练；忽略：遮罩外不参与训练；裁剪：从粗训练开始定期剔除背景点，并清理导出结果。'))
+                editor.currentIndexChanged.connect(self.parameter_changed)
+                self.layouts['basic'].addWidget(editor)
+                self.editors[path] = (editor, str)
+                continue
             if self.step == 'train' and key in ('resume_latest', 'reuse_model'):
                 continue
             basic = BASIC[self.step]
@@ -311,7 +324,7 @@ class WorkflowWorkspace(Workspace):
             layout.addWidget(title)
             choices = {'native_ops': ('auto', 'cuda', 'torch'), 'densify_score_space': ('pixel', 'ndc'), 'growth_backend': ('resident', 'flush')}.get(key)
             if choices and isinstance(value, str):
-                editor = QComboBox()
+                editor = WheelSafeComboBox()
                 editor.addItems(list(choices) + ([value] if value not in choices else []))
                 editor.setCurrentText(value)
                 editor.currentTextChanged.connect(self.parameter_changed)
@@ -368,7 +381,7 @@ class WorkflowWorkspace(Workspace):
         result = copy.deepcopy(self.project['settings'][self.step])
         for (path, (editor, kind)) in self.editors.items():
             if isinstance(editor, QComboBox):
-                value = editor.currentText()
+                value = editor.currentData() if path == 'mask_mode' else editor.currentText()
             elif kind is bool:
                 value = editor.isChecked()
             else:

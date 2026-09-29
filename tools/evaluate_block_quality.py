@@ -89,16 +89,19 @@ def evaluate(args):
                 packet = pool.acquire(pool.candidate_blocks(tile), tile)
                 raw = packet.state
                 if len(raw):
-                    image = render_gsplat(tile, raw[:, :3].contiguous(), raw[:, 13:14].sigmoid(),
+                    rendered = render_gsplat(tile, raw[:, :3].contiguous(), raw[:, 13:14].sigmoid(),
                         raw[:, 3:6].exp(), torch.nn.functional.normalize(raw[:, 6:10], dim=1),
                         raw[:, 10:13, None].transpose(1, 2), raw[:, 14:].reshape(len(raw), -1, 3),
-                        pipe, background, sh_degree=1)['render']
+                        pipe, background, sh_degree=1)
+                    image, rendered_alpha = rendered['render'], rendered['alpha']
                 else:
                     image = torch.zeros_like(tile.original_image)
+                    rendered_alpha = torch.zeros_like(image[:1])
                 gt = tile.original_image
-                prediction = image if tile.alpha_mask is None else image*tile.alpha_mask
                 x, y, w, h = tile.tile_core
                 core = (..., slice(y, y+h), slice(x, x+w))
+                from utils.mask_loss import mask_targets
+                prediction, gt, _ = mask_targets(image, gt, tile.alpha_mask, rendered_alpha, background, core)
                 if preview is not None:
                     # Only disjoint tile cores contribute: no duplicated halo,
                     # interpolation or full-frame host assembly.
@@ -144,8 +147,8 @@ def evaluate(args):
         aggregate=metrics(total_error, total_ssim, total_pixels),
         settings=dict(resolution=1, tile_size=args.tile_size, halo=args.halo, camera_limit=args.camera_limit,
             camera_selection='heldout image_name ascending', capacity_rows=pool.capacity,
-            psnr='pixel-weighted RGB MSE; alpha applied to prediction',
-            ssim='pixel-weighted RGB map, alpha applied to prediction, halo then core; training convention'),
+            psnr='pixel-weighted RGB MSE; crop compares composited RGB, ignore masks the prediction',
+            ssim='pixel-weighted RGB map, halo then core; same mask convention as training'),
         seconds=time.perf_counter()-started, peak_allocated_gib=torch.cuda.max_memory_allocated()/2**30,
         cache_stats=pool.stats)
     output = Path(args.output_json)

@@ -1,5 +1,6 @@
 {
   "import": {
+    "mask_mode": "ignore",
     "source_path": "",
     "output_root": "",
     "checkpoint": ""

@@ -1,5 +1,6 @@
 """Qt desktop workspace with a native interactive Gaussian viewport."""
 from ui_i18n import tr
+from ui_widgets import WheelSafeComboBox
 import copy
 import codecs
 import json
@@ -199,12 +200,12 @@ class Workspace(QMainWindow):
         row.addWidget(QLabel(tr('3D 视口')))
         row.addStretch()
         row.addWidget(QLabel(tr('向上轴')))
-        self.up_axis = QComboBox()
+        self.up_axis = WheelSafeComboBox()
         self.up_axis.addItems(['Y', 'Z'])
         self.up_axis.setCurrentText('Z')
         self.up_axis.currentTextChanged.connect(self.viewport.set_up_axis)
         row.addWidget(self.up_axis)
-        self.quality = QComboBox()
+        self.quality = WheelSafeComboBox()
         self.quality.addItems([tr('640 · 快速'), tr('960 · 标准'), tr('1440 · 高质量')])
         self.quality.setCurrentIndex(1)
         self.quality.currentIndexChanged.connect(self.mark_dirty)
@@ -272,7 +273,7 @@ class Workspace(QMainWindow):
         right = QWidget()
         rl = QVBoxLayout(right)
         rl.setContentsMargins(12, 12, 12, 12)
-        self.task = QComboBox()
+        self.task = WheelSafeComboBox()
         self.task.addItems(TASKS)
         self.task.currentTextChanged.connect(self.make_form)
         rl.addWidget(self.task)

@@ -305,6 +305,13 @@ Flat 配置|Fine-model configuration
 TRANSLATIONS = dict(line.split('|', 1) for line in _PAIRS.splitlines() if '|' in line)
 # Text containing a literal separator or newline is defined separately.
 TRANSLATIONS.update({
+    '裁剪：匹配轮廓并剔除背景': 'Crop: match silhouette and remove background',
+    '不用 Mask：完整图像训练；忽略：遮罩外不参与训练；裁剪：从粗训练开始定期剔除背景点，并清理导出结果。': 'No mask: train full images. Ignore: mask out background loss. Crop: prune background points from coarse training onward and clean the exported model.',
+    'Mask 处理': 'Mask behavior',
+    '不用 Mask': 'No mask',
+    '忽略：保留三维点': 'Ignore background: keep 3D points',
+    '裁剪：剔除背景点': 'Crop background: remove 3D points',
+    '不用 Mask：完整图像训练；忽略：遮罩外不参与训练；裁剪：另在导出时剔除背景点，保留原检查点。': 'No mask: train full images. Ignore: mask out background loss. Crop: additionally remove background points on export; preserve the training checkpoint.',
     '本步骤将复用导入模型，不执行新的训练。': 'This step will reuse the imported model without running new training.',
     '构建 scaffold 并执行初始 Resident 训练，产生后续精细模型准备所需的完整检查点。': 'Build the scaffold and run initial resident training to create a full checkpoint for fine-model preparation.',
     '左键旋转   |   中键 / Shift+拖动平移   |   滚轮缩放   |   F 复位': 'Left drag: orbit   |   Middle / Shift+drag: pan   |   Wheel: zoom   |   F: reset',

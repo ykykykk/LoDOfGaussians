@@ -99,9 +99,10 @@ def _backward(packet, camera, g, opt, pipe, background, profile):
                             pipe, background, sh_degree=g.active_sh_degree)
         image = pkg['render']
         gt = camera.original_image
-        predicted = image if camera.alpha_mask is None else image * camera.alpha_mask
+        from utils.mask_loss import mask_targets
+        predicted, gt, alpha_loss = mask_targets(image, gt, camera.alpha_mask, pkg['alpha'], background)
         loss = (1 - opt.lambda_dssim) * l1_loss(predicted, gt)
-        loss = loss + opt.lambda_dssim * (1 - fused_ssim(predicted[None], gt[None]))
+        loss = loss + opt.lambda_dssim * (1 - fused_ssim(predicted[None], gt[None])) + alpha_loss
     with profile.phase('backward'):
         loss.backward()
         screen = pkg['viewspace_points'].grad

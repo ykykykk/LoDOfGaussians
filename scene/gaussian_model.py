@@ -1365,6 +1365,8 @@ class GaussianModel:
             if stored_state is not None:
                 stored_state["exp_avg"] = stored_state["exp_avg"][mask]
                 stored_state["exp_avg_sq"] = stored_state["exp_avg_sq"][mask]
+                if 'max_exp_avg_sq' in stored_state:
+                    stored_state['max_exp_avg_sq'] = stored_state['max_exp_avg_sq'][mask]
 
                 del self.optimizer.state[group['params'][0]]
                 group["params"][0] = nn.Parameter((group["params"][0][mask].requires_grad_(True)))
@@ -1378,6 +1380,7 @@ class GaussianModel:
 
     def prune_points(self, mask):
         valid_points_mask = ~mask
+        self.skybox_points = int(valid_points_mask[:self.skybox_points].sum().item())
         optimizable_tensors = self._prune_optimizer(valid_points_mask)
         
         
@@ -1394,10 +1397,8 @@ class GaussianModel:
         self.max_radii2D = self.max_radii2D[valid_points_mask]
         
         
-        indices = torch.where(mask)
-        self._xyz[indices] = 0
-        self._scaling[indices] = 0
-        self._opacity[indices] = 0
+        # Rows were already removed above. Old indices no longer address the
+        # compacted tensors and must never be zeroed after compaction.
         #
         # nodes[indices]          
             #self.nodes = 
